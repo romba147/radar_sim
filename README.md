@@ -247,24 +247,55 @@ Simple script that prints the Python version and executable path to the console.
 
 ---
 
-## Running the Simulation
+## Requirements
+
+Install all dependencies with:
+
+```bash
+pip install numpy scipy matplotlib xgboost scikit-learn streamlit pandas
+```
+
+| Package | Purpose |
+|---|---|
+| `numpy` | Array math throughout the pipeline |
+| `scipy` | Least-squares solvers used in fusion |
+| `matplotlib` | All plot generation |
+| `xgboost` | ML intercept probability model |
+| `scikit-learn` | Train/test split and evaluation metrics |
+| `streamlit` | Interactive dashboard (`app.py`) |
+| `pandas` | DataFrames displayed in the dashboard |
+
+---
+
+## How to Run
+
+### Option 1 — Streamlit Dashboard (recommended)
+
+```bash
+streamlit run app.py
+```
+
+Then open **http://localhost:8501** in your browser.
+
+Use the sidebar to configure radars, targets, and interceptor systems, then press **▶ Run Simulation**.
+
+> If `streamlit` is not on your PATH, use the full executable path:
+> ```bash
+> C:\Users\ROMBEN\python\Local\miniconda3\Scripts\streamlit.exe run app.py
+> ```
+
+### Option 2 — Command-line script
 
 ```bash
 python main.py
 ```
 
-To retrain the XGBoost model independently:
+Runs the full pipeline headlessly and saves plots as PNG files in the working directory.
+
+### Option 3 — Train the XGBoost model
 
 ```bash
 python train_model.py
 ```
 
----
-
-## Dependencies
-
-- `numpy`
-- `scipy`
-- `matplotlib`
-- `xgboost`
-- `scikit-learn`
+Generates Monte Carlo engagement data (if missing) and trains/saves `xgb_intercept_model.json`. This is required before the dashboard can use the ML model.
