@@ -129,6 +129,58 @@ def plot_scenario_figure(scenario, geometry, systems):
     return fig
 
 
+def apply_consistent_limits(ax, radars, targets, systems, margin=0.2):
+    """Set fixed axis limits based on all entities so the plot size stays stable."""
+    xs, ys = [], []
+    for r in radars:
+        xs.append(r.position[0]); ys.append(r.position[1])
+    for t in targets:
+        xs.append(t.position[0]); ys.append(t.position[1])
+    for s in systems:
+        xs.append(s.position[0]); ys.append(s.position[1])
+        xs.append(s.position[0] + s.max_range)
+        xs.append(s.position[0] - s.max_range)
+        ys.append(s.position[1] + s.max_range)
+        ys.append(s.position[1] - s.max_range)
+    if not xs:
+        return
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    x_pad = max((x_max - x_min) * margin, 1000)
+    y_pad = max((y_max - y_min) * margin, 1000)
+    ax.set_xlim(x_min - x_pad, x_max + x_pad)
+    ax.set_ylim(y_min - y_pad, y_max + y_pad)
+
+
+def draw_border_line(ax, radars, targets, systems):
+    """Draw an auto-computed curved border line between defense assets and targets."""
+    # Collect X positions of defensive assets (radars + systems)
+    defense_xs = [r.position[0] for r in radars] + [s.position[0] for s in systems]
+    # Collect X positions of targets
+    target_xs = [t.position[0] for t in targets]
+
+    if not defense_xs or not target_xs:
+        return
+
+    max_defense_x = max(defense_xs)
+    min_target_x = min(target_xs)
+    border_x = (max_defense_x + min_target_x) / 2.0
+
+    # Use the full Y extent of the axes so the line spans edge to edge
+    y_lo, y_hi = ax.get_ylim()
+    y_span = np.linspace(y_lo, y_hi, 200)
+    y_min = y_lo
+    y_max = y_hi
+
+    # Sinusoidal perturbation for visual appeal
+    amplitude = (y_max - y_min) * 0.02
+    freq = 3.0 * np.pi / (y_max - y_min + 1e-6)
+    border_curve_x = border_x + amplitude * np.sin(freq * (y_span - y_min))
+
+    ax.plot(border_curve_x, y_span, '--', color='#8B0000', alpha=0.55,
+            linewidth=1.8, zorder=1)
+
+
 # ════════════════════════════════════════════════════════════════════
 # Page config
 # ════════════════════════════════════════════════════════════════════
@@ -152,15 +204,22 @@ with st.sidebar:
 
     # ── Radars ──────────────────────────────────────────────────────
     st.subheader("Radars")
-    n_radars = st.number_input("Number of radars", min_value=1, max_value=5,
+    n_radars = st.number_input("Number of radars", min_value=1, max_value=12,
                                value=3, step=1)
 
     radar_defaults = [
-        dict(x=0,     y=0,    z=0, fc=10.0, power=60, gain=30, bw=5.0,  az=10.0,  el=0.0),
-        dict(x=0,     y=3000, z=0, fc=9.0,  power=58, gain=30, bw=8.0,  az=-25.0, el=0.0),
-        dict(x=-2000, y=1500, z=0, fc=10.0, power=60, gain=30, bw=8.0,  az=0.0,   el=0.0),
-        dict(x=1000,  y=5000, z=0, fc=9.5,  power=55, gain=28, bw=6.0,  az=45.0,  el=0.0),
-        dict(x=3000,  y=2000, z=0, fc=10.5, power=62, gain=32, bw=4.0,  az=-10.0, el=0.0),
+        dict(x=0,      y=0,      z=0, fc=10.0, power=60, gain=30, bw=5.0, az=10.0,  el=0.0),
+        dict(x=0,      y=15000,  z=0, fc=9.0,  power=58, gain=30, bw=8.0, az=-25.0, el=0.0),
+        dict(x=-10000, y=7500,   z=0, fc=10.0, power=60, gain=30, bw=8.0, az=0.0,   el=0.0),
+        dict(x=5000,   y=25000,  z=0, fc=9.5,  power=55, gain=28, bw=6.0, az=45.0,  el=0.0),
+        dict(x=15000,  y=10000,  z=0, fc=10.5, power=62, gain=32, bw=4.0, az=-10.0, el=0.0),
+        dict(x=-5000,  y=20000,  z=0, fc=9.3,  power=57, gain=29, bw=7.0, az=20.0,  el=0.0),
+        dict(x=10000,  y=0,      z=0, fc=10.2, power=61, gain=31, bw=5.5, az=-30.0, el=0.0),
+        dict(x=20000,  y=15000,  z=0, fc=9.7,  power=59, gain=30, bw=6.5, az=15.0,  el=0.0),
+        dict(x=-15000, y=25000,  z=0, fc=10.8, power=63, gain=33, bw=4.5, az=-5.0,  el=0.0),
+        dict(x=25000,  y=5000,   z=0, fc=9.1,  power=56, gain=27, bw=9.0, az=60.0,  el=0.0),
+        dict(x=0,      y=30000,  z=0, fc=10.4, power=60, gain=30, bw=5.0, az=-45.0, el=0.0),
+        dict(x=-20000, y=10000,  z=0, fc=9.6,  power=58, gain=29, bw=7.5, az=30.0,  el=0.0),
     ]
 
     radar_cfgs = []
@@ -188,18 +247,30 @@ with st.sidebar:
 
     # ── Targets ─────────────────────────────────────────────────────
     st.subheader("Targets")
-    n_targets = st.number_input("Number of targets", min_value=1, max_value=8,
+    n_targets = st.number_input("Number of targets", min_value=1, max_value=20,
                                 value=5, step=1)
 
     target_defaults = [
-        dict(x=5000,  y=800,  z=0,  vx=25,  vy=5,   vz=0, rcs=10),
-        dict(x=3000,  y=200,  z=50, vx=-15, vy=0,   vz=0, rcs=5),
-        dict(x=7000,  y=1500, z=0,  vx=20,  vy=-10, vz=0, rcs=15),
-        dict(x=2000,  y=100,  z=0,  vx=10,  vy=2,   vz=0, rcs=0),
-        dict(x=6000,  y=-500, z=0,  vx=-30, vy=8,   vz=0, rcs=8),
-        dict(x=4000,  y=3000, z=100,vx=15,  vy=-5,  vz=0, rcs=5),
-        dict(x=8000,  y=500,  z=0,  vx=-20, vy=10,  vz=0, rcs=12),
-        dict(x=1500,  y=2500, z=50, vx=30,  vy=0,   vz=0, rcs=3),
+        dict(x=25000,  y=4000,   z=0,   vx=-200, vy=-30,  vz=0, rcs=10),  # inbound from ~NE
+        dict(x=15000,  y=1000,   z=500, vx=-150, vy=-10,  vz=0, rcs=5),   # inbound from E
+        dict(x=35000,  y=7500,   z=0,   vx=-245, vy=-50,  vz=0, rcs=15),  # inbound from NE
+        dict(x=10000,  y=500,    z=0,   vx=-120, vy=-5,   vz=0, rcs=0),   # inbound from E
+        dict(x=30000,  y=-2500,  z=0,   vx=-220, vy=20,   vz=0, rcs=8),   # inbound from SE
+        dict(x=20000,  y=15000,  z=500, vx=-145, vy=-110, vz=0, rcs=5),   # inbound from NE diagonal
+        dict(x=40000,  y=2500,   z=0,   vx=-280, vy=-15,  vz=0, rcs=12),  # inbound from far E
+        dict(x=7500,   y=12500,  z=500, vx=-65,  vy=-110, vz=0, rcs=3),   # inbound from N
+        dict(x=45000,  y=8000,   z=0,   vx=-305, vy=-55,  vz=0, rcs=9),   # inbound from far NE
+        dict(x=18000,  y=-5000,  z=200, vx=-175, vy=50,   vz=0, rcs=7),   # inbound from SE
+        dict(x=50000,  y=20000,  z=0,   vx=-280, vy=-110, vz=0, rcs=11),  # inbound from far NE
+        dict(x=12000,  y=18000,  z=300, vx=-80,  vy=-125, vz=0, rcs=6),   # inbound from N
+        dict(x=38000,  y=-8000,  z=0,   vx=-245, vy=50,   vz=0, rcs=14),  # inbound from far SE
+        dict(x=28000,  y=22000,  z=100, vx=-160, vy=-125, vz=0, rcs=4),   # inbound from NE
+        dict(x=55000,  y=3000,   z=0,   vx=-330, vy=-20,  vz=0, rcs=16),  # inbound from far E
+        dict(x=8000,   y=30000,  z=400, vx=-40,  vy=-155, vz=0, rcs=2),   # inbound from far N
+        dict(x=42000,  y=12000,  z=0,   vx=-260, vy=-75,  vz=0, rcs=13),  # inbound from NE
+        dict(x=22000,  y=-10000, z=0,   vx=-200, vy=90,   vz=0, rcs=8),   # inbound from SE
+        dict(x=60000,  y=25000,  z=200, vx=-295, vy=-125, vz=0, rcs=10),  # inbound from far NE
+        dict(x=16000,  y=35000,  z=500, vx=-70,  vy=-155, vz=0, rcs=5),   # inbound from far N
     ]
 
     target_cfgs = []
@@ -221,16 +292,22 @@ with st.sidebar:
 
     # ── Interceptor Systems ─────────────────────────────────────────
     st.subheader("Interceptor Systems")
-    n_systems = st.number_input("Number of systems", min_value=1, max_value=6,
+    n_systems = st.number_input("Number of systems", min_value=1, max_value=12,
                                 value=3, step=1)
 
     sys_defaults = [
-        dict(name="SAM Alpha",   x=1000,  y=1000, z=0, maxr=8000,  minr=500,  maxv=400, rt=5.0, sv=2),
-        dict(name="SAM Beta",    x=-1000, y=2500, z=0, maxr=12000, minr=300,  maxv=600, rt=3.0, sv=3),
-        dict(name="CIWS Delta",  x=500,   y=500,  z=0, maxr=2000,  minr=100,  maxv=800, rt=1.0, sv=4),
-        dict(name="SAM Gamma",   x=2000,  y=4000, z=0, maxr=10000, minr=400,  maxv=500, rt=4.0, sv=2),
-        dict(name="SAM Epsilon", x=-500,  y=3500, z=0, maxr=15000, minr=600,  maxv=700, rt=6.0, sv=1),
-        dict(name="CIWS Zeta",   x=1500,  y=-500, z=0, maxr=1500,  minr=100,  maxv=900, rt=0.5, sv=6),
+        dict(name="SAM Alpha",   x=5000,   y=5000,  z=0, maxr=8000,  minr=500, maxv=400, rt=5.0, sv=2),
+        dict(name="SAM Beta",    x=-5000,  y=12500, z=0, maxr=12000, minr=300, maxv=600, rt=3.0, sv=3),
+        dict(name="CIWS Delta",  x=2500,   y=2500,  z=0, maxr=2000,  minr=100, maxv=800, rt=1.0, sv=4),
+        dict(name="SAM Gamma",   x=10000,  y=20000, z=0, maxr=10000, minr=400, maxv=500, rt=4.0, sv=2),
+        dict(name="SAM Epsilon", x=-2500,  y=17500, z=0, maxr=15000, minr=600, maxv=700, rt=6.0, sv=1),
+        dict(name="CIWS Zeta",   x=7500,   y=-2500, z=0, maxr=1500,  minr=100, maxv=900, rt=0.5, sv=6),
+        dict(name="SAM Eta",     x=20000,  y=8000,  z=0, maxr=20000, minr=500, maxv=550, rt=4.5, sv=2),
+        dict(name="SAM Theta",   x=-12000, y=22000, z=0, maxr=18000, minr=400, maxv=650, rt=5.5, sv=3),
+        dict(name="CIWS Iota",   x=15000,  y=30000, z=0, maxr=2500,  minr=150, maxv=850, rt=0.8, sv=5),
+        dict(name="SAM Kappa",   x=30000,  y=15000, z=0, maxr=25000, minr=700, maxv=600, rt=7.0, sv=1),
+        dict(name="SAM Lambda",  x=-8000,  y=5000,  z=0, maxr=14000, minr=350, maxv=480, rt=3.5, sv=3),
+        dict(name="CIWS Mu",     x=12000,  y=-5000, z=0, maxr=1800,  minr=100, maxv=950, rt=0.6, sv=6),
     ]
 
     system_cfgs = []
@@ -263,6 +340,15 @@ with st.sidebar:
     use_ml = st.checkbox("Use ML (XGBoost) Model", value=True,
                          help="Requires xgb_intercept_model.json to exist.")
 
+    # ── Time-Stepping ───────────────────────────────────────────────
+    st.subheader("Time Stepping")
+    sim_duration = st.number_input("Duration (s)", min_value=0.0, max_value=600.0,
+                                   value=60.0, step=10.0,
+                                   help="Total simulation duration. 0 = single snapshot.")
+    time_step = st.number_input("Time Step (s)", min_value=1.0, max_value=60.0,
+                                value=10.0, step=1.0,
+                                help="Interval between frames.")
+
     st.divider()
     run_btn = st.button("▶ Run Simulation", type="primary", use_container_width=True)
 
@@ -270,11 +356,28 @@ with st.sidebar:
 # Tabs layout
 # ════════════════════════════════════════════════════════════════════
 
-tab_scenario, tab_processing, tab_fusion, tab_intercept = st.tabs([
+# ════════════════════════════════════════════════════════════════════
+# Time frame selector (visible after simulation)
+# ════════════════════════════════════════════════════════════════════
+
+if "sim_results" in st.session_state and len(st.session_state["sim_results"]["timesteps"]) > 1:
+    ts_list = st.session_state["sim_results"]["timesteps"]
+    selected_t = st.select_slider(
+        "⏱️ Time",
+        options=ts_list,
+        format_func=lambda t: f"t = {t:.1f} s",
+        key="time_slider",
+    )
+    selected_frame_idx = ts_list.index(selected_t)
+else:
+    selected_frame_idx = 0
+
+tab_scenario, tab_processing, tab_fusion, tab_intercept, tab_recommend = st.tabs([
     "🗺️ Scenario",
     "📊 Signal Processing",
     "🔗 Fusion",
     "🎯 Intercept Assessment",
+    "📋 Recommendation",
 ])
 
 # ════════════════════════════════════════════════════════════════════
@@ -318,21 +421,57 @@ def build_objects():
 
 
 # ════════════════════════════════════════════════════════════════════
-# Scenario tab — always live (no heavy compute)
+# Scenario tab — live preview at t=0; after sim show selected frame + trails
 # ════════════════════════════════════════════════════════════════════
 
 with tab_scenario:
     radars, targets, systems = build_objects()
-    scenario = Scenario(radars, targets)
-    geometry = scenario.compute_geometry()
 
-    st.subheader("Scenario Overview")
-    fig = plot_scenario_figure(scenario, geometry, systems)
-    fig_to_st(fig)
+    # If simulation has run, show the selected frame with trajectory trails
+    if "sim_results" in st.session_state:
+        sim = st.session_state["sim_results"]
+        frame = sim["frames"][selected_frame_idx]
+        frame_targets = frame["targets"]
+        frame_t = frame["t"]
+        orig_targets = sim["original_targets"]
+
+        scenario = Scenario(sim["radars"], frame_targets)
+        geometry = frame["geometry"]
+
+        st.subheader(f"Scenario Overview — t = {frame_t:.1f} s")
+        fig, ax = scenario.plot_scenario(geometry, interceptor_systems=systems,
+                                         save_path=None)
+        # Draw trajectory trails
+        for i, orig in enumerate(orig_targets):
+            trail_x = [orig.position[0] + orig.velocity[0] * ft["t"]
+                        for ft in sim["frames"]]
+            trail_y = [orig.position[1] + orig.velocity[1] * ft["t"]
+                        for ft in sim["frames"]]
+            ax.plot(trail_x, trail_y, ":", color="blue", alpha=0.35, linewidth=1.2)
+            # start marker
+            ax.plot(trail_x[0], trail_y[0], "x", color="gray", markersize=5, alpha=0.5)
+
+        ax.set_title(f"Scenario — t = {frame_t:.1f} s")
+        apply_consistent_limits(ax, sim["radars"], frame_targets, systems)
+        draw_border_line(ax, sim["radars"], frame_targets, systems)
+        fig_to_st(fig)
+    else:
+        # Live preview at t=0 (no simulation yet)
+        scenario = Scenario(radars, targets)
+        geometry = scenario.compute_geometry()
+
+        st.subheader("Scenario Overview (t = 0 — preview)")
+        fig, ax = scenario.plot_scenario(geometry, interceptor_systems=systems,
+                                         save_path=None)
+        apply_consistent_limits(ax, radars, targets, systems)
+        draw_border_line(ax, radars, targets, systems)
+        fig_to_st(fig)
 
     # Geometry table
     st.subheader("Radar–Target Geometry")
     import pandas as pd
+    if "sim_results" in st.session_state:
+        geometry = st.session_state["sim_results"]["frames"][selected_frame_idx]["geometry"]
     rows = []
     for r_idx, geom_list in geometry.items():
         for g in geom_list:
@@ -354,8 +493,14 @@ with tab_scenario:
 
 if run_btn:
     radars, targets, systems = build_objects()
-    scenario = Scenario(radars, targets)
-    geometry = scenario.compute_geometry()
+
+    # ── Build timestep list ──────────────────────────────────────────
+    if sim_duration <= 0:
+        timesteps = [0.0]
+    else:
+        timesteps = list(np.arange(0.0, sim_duration + time_step * 0.5, time_step))
+
+    n_frames = len(timesteps)
 
     # Waveform / noise / processing templates (one per radar, cycling defaults)
     waveform_templates = [
@@ -369,11 +514,34 @@ if run_btn:
         dict(rw=WindowType.HAMMING, dw=WindowType.HANNING, gc=4, tc=16, tf=22.0, mo=1),
     ]
 
-    per_radar_results = {}
-    per_radar_detections = {}
+    ml_available = use_ml and os.path.exists("xgb_intercept_model.json")
+    if use_ml and not ml_available:
+        st.warning("XGBoost model not found. Showing analytical results only.")
 
-    with st.spinner("Running signal generation & processing…"):
-        progress = st.progress(0)
+    frames = []
+    total_steps = n_frames * len(radars)
+    progress = st.progress(0)
+    status_text = st.empty()
+
+    for f_idx, t in enumerate(timesteps):
+        status_text.text(f"Frame {f_idx + 1}/{n_frames}  —  t = {t:.1f} s")
+
+        # Advance target positions by velocity * t
+        frame_targets = [
+            Target(
+                position=tgt.position + tgt.velocity * t,
+                velocity=tgt.velocity,
+                rcs_dbsm=tgt.rcs_dbsm,
+            )
+            for tgt in targets
+        ]
+
+        scenario = Scenario(radars, frame_targets)
+        geometry = scenario.compute_geometry()
+
+        per_radar_results = {}
+        per_radar_detections = {}
+
         for r_idx, radar in enumerate(radars):
             wt = waveform_templates[r_idx % len(waveform_templates)]
             pt = processing_templates[r_idx % len(processing_templates)]
@@ -414,34 +582,41 @@ if run_btn:
                 "waveform": waveform,
             }
             per_radar_detections[r_idx] = results["estimated_targets"]
-            progress.progress((r_idx + 1) / len(radars))
 
-    with st.spinner("Running multi-radar fusion…"):
+            done = f_idx * len(radars) + r_idx + 1
+            progress.progress(done / total_steps)
+
         fused_targets = associate_and_fuse(radars, per_radar_detections)
 
-    with st.spinner("Computing intercept probabilities…"):
         blackbox_ana = InterceptBlackbox(systems, use_ml=False)
         P_analytical = blackbox_ana.evaluate(fused_targets)
 
-        ml_available = use_ml and os.path.exists("xgb_intercept_model.json")
-        if use_ml and not ml_available:
-            st.warning("XGBoost model not found. Showing analytical results only.")
         P_ml = None
         if ml_available:
             blackbox_ml = InterceptBlackbox(systems, use_ml=True)
             P_ml = blackbox_ml.evaluate(fused_targets)
 
+        frames.append({
+            "t": t,
+            "targets": frame_targets,
+            "geometry": geometry,
+            "per_radar_results": per_radar_results,
+            "fused_targets": fused_targets,
+            "P_analytical": P_analytical,
+            "P_ml": P_ml,
+        })
+
+    status_text.empty()
+    progress.empty()
+
     st.session_state["sim_results"] = {
         "radars": radars,
-        "targets": targets,
+        "original_targets": targets,
         "systems": systems,
-        "geometry": geometry,
-        "per_radar_results": per_radar_results,
-        "fused_targets": fused_targets,
-        "P_analytical": P_analytical,
-        "P_ml": P_ml,
+        "timesteps": timesteps,
+        "frames": frames,
     }
-    st.success(f"Simulation complete — {len(fused_targets)} fused target(s) detected.")
+    st.rerun()
 
 # ════════════════════════════════════════════════════════════════════
 # Processing tab
@@ -452,12 +627,14 @@ with tab_processing:
         st.info("Press **▶ Run Simulation** in the sidebar to see results.")
     else:
         import pandas as pd
-        res = st.session_state["sim_results"]
-        for r_idx, data in res["per_radar_results"].items():
+        sim = st.session_state["sim_results"]
+        frame = sim["frames"][selected_frame_idx]
+        st.caption(f"Showing frame at t = {frame['t']:.1f} s")
+        for r_idx, data in frame["per_radar_results"].items():
             r = data["results"]
             estimated = r["estimated_targets"]
 
-            st.subheader(f"Radar {r_idx} — {res['radars'][r_idx].fc/1e9:.1f} GHz")
+            st.subheader(f"Radar {r_idx} — {sim['radars'][r_idx].fc/1e9:.1f} GHz")
             col1, col2 = st.columns([2, 1])
             with col1:
                 fig = plot_range_doppler(r, r_idx)
@@ -487,10 +664,11 @@ with tab_fusion:
         st.info("Press **▶ Run Simulation** in the sidebar to see results.")
     else:
         import pandas as pd
-        res = st.session_state["sim_results"]
-        fused = res["fused_targets"]
+        sim = st.session_state["sim_results"]
+        frame = sim["frames"][selected_frame_idx]
+        fused = frame["fused_targets"]
 
-        st.subheader(f"Fused Targets ({len(fused)} detected)")
+        st.subheader(f"Fused Targets ({len(fused)} detected) — t = {frame['t']:.1f} s")
 
         if not fused:
             st.warning("No fused targets detected.")
@@ -515,7 +693,7 @@ with tab_fusion:
 
             # Feature vector inspection
             st.subheader("Feature Vectors (per system–target pair)")
-            systems = res["systems"]
+            systems = sim["systems"]
             feat_rows = []
             for ft in fused:
                 for sys in systems:
@@ -534,26 +712,29 @@ with tab_intercept:
         st.info("Press **▶ Run Simulation** in the sidebar to see results.")
     else:
         import pandas as pd
-        res = st.session_state["sim_results"]
-        systems = res["systems"]
-        fused = res["fused_targets"]
-        P_ana = res["P_analytical"]
-        P_ml = res["P_ml"]
+        sim = st.session_state["sim_results"]
+        frame = sim["frames"][selected_frame_idx]
+        systems = sim["systems"]
+        fused = frame["fused_targets"]
+        P_ana = frame["P_analytical"]
+        P_ml = frame["P_ml"]
 
         if not fused:
             st.warning("No fused targets to assess.")
         else:
+            st.caption(f"Showing frame at t = {frame['t']:.1f} s")
+
             # ── Analytical ──────────────────────────────────────────
             st.subheader("Analytical Model")
             ana_fig = plot_intercept_heatmap(systems, fused, P_ana,
-                                             "Analytical Intercept Probability")
+                                             f"Analytical Intercept Probability (t={frame['t']:.1f}s)")
             fig_to_st(ana_fig)
 
             # ── ML ──────────────────────────────────────────────────
             if P_ml is not None:
                 st.subheader("XGBoost ML Model")
                 ml_fig = plot_intercept_heatmap(systems, fused, P_ml,
-                                                "ML Intercept Probability")
+                                                f"ML Intercept Probability (t={frame['t']:.1f}s)")
                 fig_to_st(ml_fig)
 
                 # Comparison scatter
@@ -572,11 +753,152 @@ with tab_intercept:
             # ── Probability table ────────────────────────────────────
             st.subheader("Full Probability Table")
             prob_rows = []
-            for i, sys in enumerate(systems):
-                row = {"System": sys.name}
+            for i, sys_obj in enumerate(systems):
+                row = {"System": sys_obj.name}
                 for j, ft in enumerate(fused):
                     row[f"FT{ft.fused_index} Ana"] = f"{P_ana[i, j]*100:.1f}%"
                     if P_ml is not None:
                         row[f"FT{ft.fused_index} ML"] = f"{P_ml[i, j]*100:.1f}%"
                 prob_rows.append(row)
             st.dataframe(pd.DataFrame(prob_rows), use_container_width=True)
+
+            # ── P(intercept) over time chart ─────────────────────────
+            if len(sim["timesteps"]) > 1:
+                st.subheader("Intercept Probability Over Time")
+                ts = sim["timesteps"]
+
+                # Build per-system mean analytical P over time
+                fig_time, ax_time = plt.subplots(figsize=(10, 4.5))
+                for s_idx, sys_obj in enumerate(systems):
+                    p_over_time = []
+                    for f in sim["frames"]:
+                        p_mat = f["P_analytical"]
+                        if p_mat.size > 0 and s_idx < p_mat.shape[0]:
+                            p_over_time.append(np.mean(p_mat[s_idx, :]) * 100)
+                        else:
+                            p_over_time.append(0.0)
+                    ax_time.plot(ts, p_over_time, "o-", label=sys_obj.name, markersize=4)
+
+                ax_time.set_xlabel("Time (s)")
+                ax_time.set_ylabel("Mean P(intercept) [%]")
+                ax_time.set_title("Analytical — Mean Intercept Probability per System Over Time")
+                ax_time.legend(fontsize=7, loc="best")
+                ax_time.grid(True, alpha=0.3)
+                ax_time.set_xlim(ts[0], ts[-1])
+                ax_time.set_ylim(-2, 102)
+                plt.tight_layout()
+                fig_to_st(fig_time)
+
+# ════════════════════════════════════════════════════════════════════
+# Recommendation tab
+# ════════════════════════════════════════════════════════════════════
+
+with tab_recommend:
+    if "sim_results" not in st.session_state:
+        st.info("Press **▶ Run Simulation** in the sidebar to see results.")
+    else:
+        import pandas as pd
+        sim = st.session_state["sim_results"]
+        frame = sim["frames"][selected_frame_idx]
+        systems = sim["systems"]
+        radars_sim = sim["radars"]
+        fused = frame["fused_targets"]
+        P_ml = frame["P_ml"]
+        P_ana = frame["P_analytical"]
+
+        # Use ML if available, else analytical
+        P = P_ml if P_ml is not None else P_ana
+        prob_label = "ML" if P_ml is not None else "Analytical"
+
+        if not fused:
+            st.warning("No fused targets detected — cannot generate recommendations.")
+        else:
+            st.subheader(f"Best Interceptor Recommendation — t = {frame['t']:.1f} s")
+            st.caption(f"Probability source: **{prob_label}**")
+
+            # ── Build recommendation map ─────────────────────────────
+            fig, ax = plt.subplots(figsize=(13, 9))
+
+            # Draw radars
+            radar_colors = plt.cm.Set1(np.linspace(0, 1, max(len(radars_sim), 3)))
+            for r_idx, radar in enumerate(radars_sim):
+                rx, ry = radar.position[0], radar.position[1]
+                ax.plot(rx, ry, "s", color=radar_colors[r_idx], markersize=11,
+                        label=f"Radar {r_idx} ({radar.fc/1e9:.1f} GHz)")
+                ax.annotate(f"R{r_idx}", (rx, ry),
+                            textcoords="offset points", xytext=(-12, -12),
+                            fontsize=7, color=radar_colors[r_idx], fontweight="bold")
+
+            # Draw interceptor systems
+            intc_colors = plt.cm.Dark2(np.linspace(0, 1, max(len(systems), 3)))
+            for s_idx, sys_obj in enumerate(systems):
+                sx, sy = sys_obj.position[0], sys_obj.position[1]
+                ax.plot(sx, sy, "^", color=intc_colors[s_idx], markersize=12,
+                        label=sys_obj.name)
+                ax.annotate(sys_obj.name, (sx, sy),
+                            textcoords="offset points", xytext=(8, -14),
+                            fontsize=6, color=intc_colors[s_idx], fontweight="bold")
+
+            # Draw fused targets and best interceptor connections
+            recommendations = []
+            for j, ft in enumerate(fused):
+                tx, ty = ft.position[0], ft.position[1]
+                ax.plot(tx, ty, "o", color="crimson", markersize=10, zorder=5)
+                ax.annotate(f"FT{ft.fused_index}",
+                            (tx, ty), textcoords="offset points", xytext=(10, 6),
+                            fontsize=8, color="crimson", fontweight="bold")
+
+                # Find best interceptor for this target
+                if j < P.shape[1]:
+                    probs_for_target = P[:, j]
+                    best_idx = int(np.argmax(probs_for_target))
+                    best_prob = probs_for_target[best_idx]
+
+                    if best_prob > 0:
+                        best_sys = systems[best_idx]
+                        sx, sy = best_sys.position[0], best_sys.position[1]
+
+                        # Red line from target to best interceptor
+                        ax.plot([tx, sx], [ty, sy], '-', color='red',
+                                linewidth=2.0, alpha=0.7, zorder=3)
+
+                        # Probability label at midpoint
+                        mid_x, mid_y = (tx + sx) / 2, (ty + sy) / 2
+                        ax.text(mid_x, mid_y, f"{best_prob*100:.1f}%",
+                                ha="center", va="center", fontsize=8,
+                                fontweight="bold", color="white",
+                                bbox=dict(boxstyle="round,pad=0.3",
+                                          facecolor="red", alpha=0.8))
+
+                        recommendations.append({
+                            "Target": f"FT{ft.fused_index}",
+                            "Position": f"({ft.position[0]:.0f}, {ft.position[1]:.0f})",
+                            "Best Interceptor": best_sys.name,
+                            "P(intercept)": f"{best_prob*100:.1f}%",
+                        })
+                    else:
+                        # No viable interceptor
+                        ax.annotate("No viable\ninterceptor",
+                                    (tx, ty), textcoords="offset points",
+                                    xytext=(10, -18), fontsize=6,
+                                    color="gray", fontstyle="italic")
+                        recommendations.append({
+                            "Target": f"FT{ft.fused_index}",
+                            "Position": f"({ft.position[0]:.0f}, {ft.position[1]:.0f})",
+                            "Best Interceptor": "—",
+                            "P(intercept)": "0.0%",
+                        })
+
+            ax.set_xlabel("X [m]")
+            ax.set_ylabel("Y [m]")
+            ax.set_title("Tactical Recommendation Map — Best Interceptor per Target")
+            ax.set_aspect("equal")
+            ax.legend(loc="upper left", fontsize=7, ncol=2)
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            fig_to_st(fig)
+
+            # ── Summary table ────────────────────────────────────────
+            st.subheader("Recommendation Summary")
+            if recommendations:
+                st.dataframe(pd.DataFrame(recommendations), use_container_width=True)
