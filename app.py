@@ -13,6 +13,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
 import streamlit as st
 
 # ── ensure workspace is on the path ─────────────────────────────────
@@ -179,6 +180,582 @@ def draw_border_line(ax, radars, targets, systems):
 
     ax.plot(border_curve_x, y_span, '--', color='#8B0000', alpha=0.55,
             linewidth=1.8, zorder=1)
+
+
+# ════════════════════════════════════════════════════════════════════
+# Plotly animated tactical chart builders
+# ════════════════════════════════════════════════════════════════════
+
+def build_scenario_plotly(sim_results: dict, systems: list):
+    """Build an animated Plotly tactical map (dark theme) for the Scenario tab."""
+    radars           = sim_results["radars"]
+    original_targets = sim_results["original_targets"]
+    frames_data      = sim_results["frames"]
+    n_targets        = len(original_targets)
+
+    BG       = "#0d1117"
+    GRID     = "#1e2937"
+    TEXT_COL = "#c9d1d9"
+    CYAN     = "#00d4ff"
+    GREEN    = "#00ff88"
+    RED      = "#ff4444"
+    ORANGE   = "#ff8c00"
+    DARK_RED = "#8B0000"
+
+    # ── Axis bounds ──────────────────────────────────────────────────
+    all_x, all_y = [], []
+    for r in radars:
+        all_x.append(float(r.position[0])); all_y.append(float(r.position[1]))
+    for s in systems:
+        all_x.extend([float(s.position[0] + s.max_range),
+                       float(s.position[0] - s.max_range)])
+        all_y.extend([float(s.position[1] + s.max_range),
+                       float(s.position[1] - s.max_range)])
+    for fd in frames_data:
+        for tgt in fd["targets"]:
+            all_x.append(float(tgt.position[0]))
+            all_y.append(float(tgt.position[1]))
+    if not all_x:
+        all_x = [0.0, 10000.0]
+    if not all_y:
+        all_y = [0.0, 10000.0]
+    x_min, x_max = min(all_x), max(all_x)
+    y_min, y_max = min(all_y), max(all_y)
+    x_pad = max((x_max - x_min) * 0.15, 2000.0)
+    y_pad = max((y_max - y_min) * 0.15, 2000.0)
+    x_range = [x_min - x_pad, x_max + x_pad]
+    y_range = [y_min - y_pad, y_max + y_pad]
+
+    # ── Beam-wedge scale from t=0 geometry ───────────────────────────
+    first_geom = frames_data[0]["geometry"]
+    all_ranges = [g.range_m for glist in first_geom.values() for g in glist]
+    max_r = float(max(all_ranges)) * 1.2 if all_ranges else 10000.0
+
+    # ═══════════════════════ STATIC TRACES ═══════════════════════════
+    traces = []
+
+    # 1) Radar positions
+    traces.append(go.Scatter(
+        x=[float(r.position[0]) for r in radars],
+        y=[float(r.position[1]) for r in radars],
+        mode="markers+text",
+        marker=dict(symbol="diamond", size=16, color=CYAN,
+                    line=dict(width=2, color=CYAN), opacity=0.9),
+        text=[f"R{i}" for i in range(len(radars))],
+        textposition="top center",
+        textfont=dict(color=CYAN, size=11, family="monospace"),
+        hovertext=[
+            f"Radar {i}<br>{r.fc/1e9:.2f} GHz  Pt={r.tx_power_dBm:.0f} dBm  G={r.antenna_gain_dB:.0f} dB"
+            for i, r in enumerate(radars)
+        ],
+        hoverinfo="text", name="Radars", showlegend=True,
+    ))
+
+    # 2) Beam wedges (filled polygon, one per radar)
+    for r_idx, radar in enumerate(radars):
+        rx, ry = float(radar.position[0]), float(radar.position[1])
+        look_az_rad = np.radians(radar.look_azimuth)
+        bw_rad = np.radians(radar.antenna_beamwidth)
+        angles = np.linspace(look_az_rad - bw_rad / 2, look_az_rad + bw_rad / 2, 40)
+        wedge_x = [rx] + list(rx + max_r * np.cos(angles)) + [rx, None]
+        wedge_y = [ry] + list(ry + max_r * np.sin(angles)) + [ry, None]
+        traces.append(go.Scatter(
+            x=wedge_x, y=wedge_y, mode="lines",
+            fill="toself", fillcolor="rgba(0,212,255,0.06)",
+            line=dict(color=CYAN, width=0.8, dash="dot"),
+            hoverinfo="skip", showlegend=False,
+        ))
+
+    # 3) Interceptor positions
+    traces.append(go.Scatter(
+        x=[float(s.position[0]) for s in systems],
+        y=[float(s.position[1]) for s in systems],
+        mode="markers+text",
+        marker=dict(symbol="triangle-up", size=18, color=GREEN,
+                    line=dict(width=2, color=GREEN), opacity=0.9),
+        text=[s.name[:10] for s in systems],
+        textposition="bottom center",
+        textfont=dict(color=GREEN, size=9, family="monospace"),
+        hovertext=[
+            f"{s.name}<br>MaxR={s.max_range:.0f}m  MinR={s.min_range:.0f}m<br>"
+            f"MaxV={s.max_target_velocity:.0f} m/s  RT={s.reaction_time:.1f}s"
+            for s in systems
+        ],
+        hoverinfo="text", name="Interceptors", showlegend=True,
+    ))
+
+    # 4) Range rings (max + min, one Scatter per system)
+    theta = np.linspace(0, 2 * np.pi, 120)
+    for s in systems:
+        sx, sy = float(s.position[0]), float(s.position[1])
+        traces.append(go.Scatter(
+            x=list(sx + s.max_range * np.cos(theta)) + [None],
+            y=list(sy + s.max_range * np.sin(theta)) + [None],
+            mode="lines", line=dict(color=GREEN, width=1.0, dash="dash"),
+            opacity=0.3, hoverinfo="skip", showlegend=False,
+        ))
+        traces.append(go.Scatter(
+            x=list(sx + s.min_range * np.cos(theta)) + [None],
+            y=list(sy + s.min_range * np.sin(theta)) + [None],
+            mode="lines", line=dict(color=GREEN, width=0.6, dash="dot"),
+            opacity=0.2, hoverinfo="skip", showlegend=False,
+        ))
+
+    # 5) Border line (defence / target zone divider)
+    defense_xs = ([float(r.position[0]) for r in radars]
+                  + [float(s.position[0]) for s in systems])
+    target_xs_all = [float(tgt.position[0])
+                     for fd in frames_data for tgt in fd["targets"]]
+    if defense_xs and target_xs_all:
+        bx_mid = (max(defense_xs) + min(target_xs_all)) / 2.0
+        y_span = np.linspace(y_range[0], y_range[1], 200)
+        amp  = (y_range[1] - y_range[0]) * 0.02
+        freq = 3.0 * np.pi / max(y_range[1] - y_range[0], 1.0)
+        bx_curve = bx_mid + amp * np.sin(freq * (y_span - y_range[0]))
+        traces.append(go.Scatter(
+            x=list(bx_curve), y=list(y_span), mode="lines",
+            line=dict(color=DARK_RED, width=2.0, dash="dash"),
+            opacity=0.55, hoverinfo="skip", showlegend=False,
+        ))
+
+    n_static = len(traces)
+
+    # ══════════════════ ANIMATED TRACE INDICES ════════════════════════
+    glow_idx    = n_static        # large semi-transparent glow circles
+    target_idx  = n_static + 1   # solid target markers + labels
+    trail_start = n_static + 2   # one trail trace per original target
+
+    # ── Initial (t=0) animated traces ────────────────────────────────
+    init_tgts = frames_data[0]["targets"]
+    traces.append(go.Scatter(
+        x=[float(t.position[0]) for t in init_tgts],
+        y=[float(t.position[1]) for t in init_tgts],
+        mode="markers",
+        marker=dict(symbol="circle", size=28, color=RED, opacity=0.12),
+        hoverinfo="skip", showlegend=False,
+    ))
+    traces.append(go.Scatter(
+        x=[float(t.position[0]) for t in init_tgts],
+        y=[float(t.position[1]) for t in init_tgts],
+        mode="markers+text",
+        marker=dict(symbol="circle", size=12, color=RED,
+                    line=dict(width=1.5, color="#ff8888"), opacity=0.95),
+        text=[f"T{i}" for i in range(len(init_tgts))],
+        textposition="top right",
+        textfont=dict(color=RED, size=10, family="monospace"),
+        hovertext=[
+            f"Target {i}<br>X={t.position[0]:.0f}m  Y={t.position[1]:.0f}m<br>"
+            f"Vx={t.velocity[0]:.1f}  Vy={t.velocity[1]:.1f} m/s<br>RCS={t.rcs_dbsm:.1f} dBsm"
+            for i, t in enumerate(init_tgts)
+        ],
+        hoverinfo="text", name="Targets", showlegend=True,
+    ))
+    for _ in range(n_targets):
+        traces.append(go.Scatter(
+            x=[], y=[], mode="lines",
+            line=dict(color=ORANGE, width=1.5, dash="dot"),
+            opacity=0.5, hoverinfo="skip", showlegend=False,
+        ))
+
+    # ── Velocity-arrow annotation builder ────────────────────────────
+    def _vel_annotations(tgt_list):
+        anns = []
+        for tgt in tgt_list:
+            vel_mag = float(np.linalg.norm(tgt.velocity[:2]))
+            scale = max_r * 0.04 / (vel_mag + 1e-6)
+            anns.append(dict(
+                x=float(tgt.position[0] + tgt.velocity[0] * scale),
+                y=float(tgt.position[1] + tgt.velocity[1] * scale),
+                ax=float(tgt.position[0]),
+                ay=float(tgt.position[1]),
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True,
+                arrowhead=2, arrowsize=1.2, arrowwidth=2.0,
+                arrowcolor=ORANGE, opacity=0.85,
+            ))
+        return anns
+
+    # ══════════════════ PLOTLY FRAMES ════════════════════════════════
+    plotly_frames = []
+    for f_idx, fd in enumerate(frames_data):
+        t_val      = fd["t"]
+        frame_tgts = fd["targets"]
+        tgt_x = [float(t.position[0]) for t in frame_tgts]
+        tgt_y = [float(t.position[1]) for t in frame_tgts]
+        tgt_hover = [
+            f"Target {i}<br>X={t.position[0]:.0f}m  Y={t.position[1]:.0f}m<br>"
+            f"Vx={t.velocity[0]:.1f}  Vy={t.velocity[1]:.1f} m/s<br>RCS={t.rcs_dbsm:.1f} dBsm"
+            for i, t in enumerate(frame_tgts)
+        ]
+
+        frame_data_list  = []
+        frame_trace_idxs = []
+
+        # Glow
+        frame_data_list.append(go.Scatter(x=tgt_x, y=tgt_y))
+        frame_trace_idxs.append(glow_idx)
+
+        # Targets
+        frame_data_list.append(go.Scatter(
+            x=tgt_x, y=tgt_y,
+            text=[f"T{i}" for i in range(len(frame_tgts))],
+            hovertext=tgt_hover,
+        ))
+        frame_trace_idxs.append(target_idx)
+
+        # Trails (grow with each frame)
+        for ti, orig in enumerate(original_targets):
+            tx_t = [float(orig.position[0] + orig.velocity[0] * frames_data[j]["t"])
+                    for j in range(f_idx + 1)]
+            ty_t = [float(orig.position[1] + orig.velocity[1] * frames_data[j]["t"])
+                    for j in range(f_idx + 1)]
+            frame_data_list.append(go.Scatter(x=tx_t, y=ty_t))
+            frame_trace_idxs.append(trail_start + ti)
+
+        plotly_frames.append(go.Frame(
+            data=frame_data_list,
+            traces=frame_trace_idxs,
+            layout=go.Layout(
+                title_text=f"\U0001f3af Tactical Scenario \u2014 t = {t_val:.1f} s",
+                annotations=_vel_annotations(frame_tgts),
+            ),
+            name=f"{t_val:.1f}",
+        ))
+
+    # ══════════════════ PLAY / PAUSE / SLIDER ════════════════════════
+    has_anim    = len(plotly_frames) > 1
+    updatemenus = []
+    sliders_cfg = []
+
+    if has_anim:
+        updatemenus = [dict(
+            type="buttons", showactive=False,
+            x=0.05, xanchor="right",
+            y=1.15, yanchor="top",
+            bgcolor="#161b22", bordercolor="#30363d",
+            font=dict(color=TEXT_COL),
+            buttons=[
+                dict(
+                    label="\u25b6  Play", method="animate",
+                    args=[None, {"frame": {"duration": 800, "redraw": True},
+                                 "fromcurrent": True,
+                                 "transition": {"duration": 300,
+                                                "easing": "cubic-in-out"}}],
+                ),
+                dict(
+                    label="\u23f8  Pause", method="animate",
+                    args=[[None], {"frame": {"duration": 0, "redraw": False},
+                                   "mode": "immediate",
+                                   "transition": {"duration": 0}}],
+                ),
+            ],
+        )]
+        sliders_cfg = [dict(
+            active=0,
+            currentvalue=dict(
+                prefix="t = ", suffix=" s",
+                font=dict(color=TEXT_COL, size=13),
+                visible=True, xanchor="right",
+            ),
+            pad=dict(b=10, t=55), len=0.85,
+            x=0.1, y=0, xanchor="left", yanchor="top",
+            bgcolor="#161b22", bordercolor="#30363d",
+            font=dict(color=TEXT_COL, size=10),
+            steps=[
+                dict(
+                    label=f"{fd['t']:.0f}",
+                    method="animate",
+                    args=[[f"{fd['t']:.1f}"],
+                          {"frame": {"duration": 300, "redraw": True},
+                           "mode": "immediate",
+                           "transition": {"duration": 200}}],
+                )
+                for fd in frames_data
+            ],
+        )]
+
+    layout = go.Layout(
+        title=dict(
+            text="\U0001f3af Tactical Scenario \u2014 t = 0.0 s",
+            font=dict(color=TEXT_COL, size=16, family="monospace"),
+            x=0.5, xanchor="center",
+        ),
+        paper_bgcolor=BG, plot_bgcolor=BG,
+        xaxis=dict(
+            title=dict(text="X [m]", font=dict(color=TEXT_COL)),
+            range=x_range, tickfont=dict(color=TEXT_COL),
+            gridcolor=GRID, zerolinecolor=GRID,
+        ),
+        yaxis=dict(
+            title=dict(text="Y [m]", font=dict(color=TEXT_COL)),
+            range=y_range, tickfont=dict(color=TEXT_COL),
+            gridcolor=GRID, zerolinecolor=GRID,
+            scaleanchor="x", scaleratio=1,
+        ),
+        legend=dict(
+            bgcolor="rgba(13,17,23,0.85)", bordercolor="#30363d",
+            borderwidth=1, font=dict(color=TEXT_COL, size=10),
+        ),
+        annotations=_vel_annotations(init_tgts),
+        updatemenus=updatemenus,
+        sliders=sliders_cfg,
+        margin=dict(l=60, r=20, t=120, b=100),
+        height=680,
+    )
+    return go.Figure(data=traces, layout=layout, frames=plotly_frames)
+
+
+def build_recommendation_plotly(sim_results: dict, systems: list):
+    """Build an animated Plotly tactical recommendation map (dark theme)."""
+    radars      = sim_results["radars"]
+    frames_data = sim_results["frames"]
+
+    BG       = "#0d1117"
+    GRID     = "#1e2937"
+    TEXT_COL = "#c9d1d9"
+    CYAN     = "#00d4ff"
+    GREEN    = "#00ff88"
+    RED      = "#ff4444"
+
+    # ── Axis bounds ──────────────────────────────────────────────────
+    all_x, all_y = [], []
+    for r in radars:
+        all_x.append(float(r.position[0])); all_y.append(float(r.position[1]))
+    for s in systems:
+        all_x.append(float(s.position[0])); all_y.append(float(s.position[1]))
+    for fd in frames_data:
+        for ft in fd["fused_targets"]:
+            all_x.append(float(ft.position[0])); all_y.append(float(ft.position[1]))
+    if not all_x:
+        all_x = [0.0, 10000.0]
+    if not all_y:
+        all_y = [0.0, 10000.0]
+    x_min, x_max = min(all_x), max(all_x)
+    y_min, y_max = min(all_y), max(all_y)
+    x_pad = max((x_max - x_min) * 0.15, 2000.0)
+    y_pad = max((y_max - y_min) * 0.15, 2000.0)
+    x_range = [x_min - x_pad, x_max + x_pad]
+    y_range = [y_min - y_pad, y_max + y_pad]
+
+    # ═══════════════════════ STATIC TRACES ═══════════════════════════
+    traces = []
+
+    # Radars
+    traces.append(go.Scatter(
+        x=[float(r.position[0]) for r in radars],
+        y=[float(r.position[1]) for r in radars],
+        mode="markers+text",
+        marker=dict(symbol="diamond", size=14, color=CYAN,
+                    line=dict(width=2, color=CYAN), opacity=0.9),
+        text=[f"R{i}" for i in range(len(radars))],
+        textposition="top center",
+        textfont=dict(color=CYAN, size=10, family="monospace"),
+        hovertext=[f"Radar {i} \u2014 {r.fc/1e9:.2f} GHz" for i, r in enumerate(radars)],
+        hoverinfo="text", name="Radars", showlegend=True,
+    ))
+
+    # Interceptors
+    traces.append(go.Scatter(
+        x=[float(s.position[0]) for s in systems],
+        y=[float(s.position[1]) for s in systems],
+        mode="markers+text",
+        marker=dict(symbol="triangle-up", size=18, color=GREEN,
+                    line=dict(width=2, color=GREEN), opacity=0.9),
+        text=[s.name[:10] for s in systems],
+        textposition="bottom center",
+        textfont=dict(color=GREEN, size=9, family="monospace"),
+        hovertext=[
+            f"{s.name}<br>MaxR={s.max_range:.0f}m  MinR={s.min_range:.0f}m"
+            for s in systems
+        ],
+        hoverinfo="text", name="Interceptors", showlegend=True,
+    ))
+
+    n_static  = len(traces)
+    fused_idx = n_static
+    lines_idx = n_static + 1
+
+    # ── Engagement line + annotation helpers ─────────────────────────
+    def _eng_lines(fused, P):
+        lx, ly = [], []
+        if P is None or len(fused) == 0 or P.size == 0:
+            return lx, ly
+        for j, ft in enumerate(fused):
+            if j >= P.shape[1]:
+                break
+            best_i = int(np.argmax(P[:, j]))
+            if float(P[best_i, j]) > 0:
+                sx = float(systems[best_i].position[0])
+                sy = float(systems[best_i].position[1])
+                lx += [float(ft.position[0]), sx, None]
+                ly += [float(ft.position[1]), sy, None]
+        return lx, ly
+
+    def _prob_anns(fused, P):
+        anns = []
+        if P is None or len(fused) == 0 or P.size == 0:
+            return anns
+        for j, ft in enumerate(fused):
+            if j >= P.shape[1]:
+                break
+            best_i = int(np.argmax(P[:, j]))
+            bp = float(P[best_i, j])
+            if bp > 0:
+                sx = float(systems[best_i].position[0])
+                sy = float(systems[best_i].position[1])
+                anns.append(dict(
+                    x=(float(ft.position[0]) + sx) / 2,
+                    y=(float(ft.position[1]) + sy) / 2,
+                    text=f"<b>{bp * 100:.1f}%</b>",
+                    showarrow=False,
+                    font=dict(color="white", size=11, family="monospace"),
+                    bgcolor="rgba(220,0,0,0.8)",
+                    bordercolor="#ff4444", borderwidth=1,
+                    opacity=0.9, xref="x", yref="y",
+                ))
+        return anns
+
+    # ── Initial frame ─────────────────────────────────────────────────
+    init_fd    = frames_data[0]
+    init_fused = init_fd["fused_targets"]
+    init_P     = init_fd["P_ml"] if init_fd["P_ml"] is not None else init_fd["P_analytical"]
+    lx0, ly0   = _eng_lines(init_fused, init_P)
+    init_anns  = _prob_anns(init_fused, init_P)
+
+    traces.append(go.Scatter(
+        x=[float(ft.position[0]) for ft in init_fused],
+        y=[float(ft.position[1]) for ft in init_fused],
+        mode="markers+text",
+        marker=dict(symbol="circle", size=14, color=RED,
+                    line=dict(width=2, color="#ff8888"), opacity=0.95),
+        text=[f"FT{ft.fused_index}" for ft in init_fused],
+        textposition="top right",
+        textfont=dict(color=RED, size=10, family="monospace"),
+        hovertext=[
+            f"FT{ft.fused_index}<br>X={ft.position[0]:.0f}m  Y={ft.position[1]:.0f}m<br>"
+            f"Speed={np.linalg.norm(ft.velocity_vector):.1f} m/s  TQ={ft.track_quality:.2f}"
+            for ft in init_fused
+        ],
+        hoverinfo="text", name="Fused Targets", showlegend=True,
+    ))
+    traces.append(go.Scatter(
+        x=lx0, y=ly0, mode="lines",
+        line=dict(color="#ff3333", width=2.5),
+        opacity=0.8, hoverinfo="skip", name="Engagement", showlegend=True,
+    ))
+
+    # ══════════════════ PLOTLY FRAMES ════════════════════════════════
+    plotly_frames = []
+    for fd in frames_data:
+        t_val  = fd["t"]
+        fused  = fd["fused_targets"]
+        P      = fd["P_ml"] if fd["P_ml"] is not None else fd["P_analytical"]
+        lx, ly = _eng_lines(fused, P)
+        anns   = _prob_anns(fused, P)
+
+        plotly_frames.append(go.Frame(
+            data=[
+                go.Scatter(
+                    x=[float(ft.position[0]) for ft in fused],
+                    y=[float(ft.position[1]) for ft in fused],
+                    text=[f"FT{ft.fused_index}" for ft in fused],
+                    hovertext=[
+                        f"FT{ft.fused_index}<br>X={ft.position[0]:.0f}m  Y={ft.position[1]:.0f}m<br>"
+                        f"Speed={np.linalg.norm(ft.velocity_vector):.1f} m/s  TQ={ft.track_quality:.2f}"
+                        for ft in fused
+                    ],
+                ),
+                go.Scatter(x=lx, y=ly),
+            ],
+            traces=[fused_idx, lines_idx],
+            layout=go.Layout(
+                title_text=f"\U0001f3af Tactical Recommendation \u2014 t = {t_val:.1f} s",
+                annotations=anns,
+            ),
+            name=f"{t_val:.1f}",
+        ))
+
+    # ══════════════════ PLAY / PAUSE / SLIDER ════════════════════════
+    has_anim    = len(plotly_frames) > 1
+    updatemenus = []
+    sliders_cfg = []
+
+    if has_anim:
+        updatemenus = [dict(
+            type="buttons", showactive=False,
+            x=0.05, xanchor="right",
+            y=1.15, yanchor="top",
+            bgcolor="#161b22", bordercolor="#30363d",
+            font=dict(color=TEXT_COL),
+            buttons=[
+                dict(
+                    label="\u25b6  Play", method="animate",
+                    args=[None, {"frame": {"duration": 800, "redraw": True},
+                                 "fromcurrent": True,
+                                 "transition": {"duration": 300,
+                                                "easing": "cubic-in-out"}}],
+                ),
+                dict(
+                    label="\u23f8  Pause", method="animate",
+                    args=[[None], {"frame": {"duration": 0, "redraw": False},
+                                   "mode": "immediate",
+                                   "transition": {"duration": 0}}],
+                ),
+            ],
+        )]
+        sliders_cfg = [dict(
+            active=0,
+            currentvalue=dict(
+                prefix="t = ", suffix=" s",
+                font=dict(color=TEXT_COL, size=13),
+                visible=True, xanchor="right",
+            ),
+            pad=dict(b=10, t=55), len=0.85,
+            x=0.1, y=0, xanchor="left", yanchor="top",
+            bgcolor="#161b22", bordercolor="#30363d",
+            font=dict(color=TEXT_COL, size=10),
+            steps=[
+                dict(
+                    label=f"{fd['t']:.0f}",
+                    method="animate",
+                    args=[[f"{fd['t']:.1f}"],
+                          {"frame": {"duration": 300, "redraw": True},
+                           "mode": "immediate",
+                           "transition": {"duration": 200}}],
+                )
+                for fd in frames_data
+            ],
+        )]
+
+    layout = go.Layout(
+        title=dict(
+            text="\U0001f3af Tactical Recommendation \u2014 t = 0.0 s",
+            font=dict(color=TEXT_COL, size=16, family="monospace"),
+            x=0.5, xanchor="center",
+        ),
+        paper_bgcolor=BG, plot_bgcolor=BG,
+        xaxis=dict(
+            title=dict(text="X [m]", font=dict(color=TEXT_COL)),
+            range=x_range, tickfont=dict(color=TEXT_COL),
+            gridcolor=GRID, zerolinecolor=GRID,
+        ),
+        yaxis=dict(
+            title=dict(text="Y [m]", font=dict(color=TEXT_COL)),
+            range=y_range, tickfont=dict(color=TEXT_COL),
+            gridcolor=GRID, zerolinecolor=GRID,
+            scaleanchor="x", scaleratio=1,
+        ),
+        legend=dict(
+            bgcolor="rgba(13,17,23,0.85)", bordercolor="#30363d",
+            borderwidth=1, font=dict(color=TEXT_COL, size=10),
+        ),
+        annotations=init_anns,
+        updatemenus=updatemenus,
+        sliders=sliders_cfg,
+        margin=dict(l=60, r=20, t=120, b=100),
+        height=680,
+    )
+    return go.Figure(data=traces, layout=layout, frames=plotly_frames)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -427,34 +1004,14 @@ def build_objects():
 with tab_scenario:
     radars, targets, systems = build_objects()
 
-    # If simulation has run, show the selected frame with trajectory trails
+    # If simulation has run, show animated Plotly tactical map
     if "sim_results" in st.session_state:
         sim = st.session_state["sim_results"]
-        frame = sim["frames"][selected_frame_idx]
-        frame_targets = frame["targets"]
-        frame_t = frame["t"]
-        orig_targets = sim["original_targets"]
-
-        scenario = Scenario(sim["radars"], frame_targets)
-        geometry = frame["geometry"]
-
-        st.subheader(f"Scenario Overview — t = {frame_t:.1f} s")
-        fig, ax = scenario.plot_scenario(geometry, interceptor_systems=systems,
-                                         save_path=None)
-        # Draw trajectory trails
-        for i, orig in enumerate(orig_targets):
-            trail_x = [orig.position[0] + orig.velocity[0] * ft["t"]
-                        for ft in sim["frames"]]
-            trail_y = [orig.position[1] + orig.velocity[1] * ft["t"]
-                        for ft in sim["frames"]]
-            ax.plot(trail_x, trail_y, ":", color="blue", alpha=0.35, linewidth=1.2)
-            # start marker
-            ax.plot(trail_x[0], trail_y[0], "x", color="gray", markersize=5, alpha=0.5)
-
-        ax.set_title(f"Scenario — t = {frame_t:.1f} s")
-        apply_consistent_limits(ax, sim["radars"], frame_targets, systems)
-        draw_border_line(ax, sim["radars"], frame_targets, systems)
-        fig_to_st(fig)
+        geometry = sim["frames"][selected_frame_idx]["geometry"]
+        st.plotly_chart(
+            build_scenario_plotly(sim, sim["systems"]),
+            use_container_width=True, theme=None,
+        )
     else:
         # Live preview at t=0 (no simulation yet)
         scenario = Scenario(radars, targets)
@@ -798,107 +1355,39 @@ with tab_recommend:
         st.info("Press **▶ Run Simulation** in the sidebar to see results.")
     else:
         import pandas as pd
-        sim = st.session_state["sim_results"]
-        frame = sim["frames"][selected_frame_idx]
-        systems = sim["systems"]
-        radars_sim = sim["radars"]
-        fused = frame["fused_targets"]
-        P_ml = frame["P_ml"]
-        P_ana = frame["P_analytical"]
-
-        # Use ML if available, else analytical
-        P = P_ml if P_ml is not None else P_ana
+        sim      = st.session_state["sim_results"]
+        systems  = sim["systems"]
+        frame    = sim["frames"][selected_frame_idx]
+        fused    = frame["fused_targets"]
+        P_ml     = frame["P_ml"]
+        P_ana    = frame["P_analytical"]
+        P        = P_ml if P_ml is not None else P_ana
         prob_label = "ML" if P_ml is not None else "Analytical"
 
+        # ── Animated Plotly recommendation map ───────────────────────
+        st.plotly_chart(
+            build_recommendation_plotly(sim, systems),
+            use_container_width=True, theme=None,
+        )
+
+        # ── Summary table (driven by Streamlit time slider) ──────────
         if not fused:
-            st.warning("No fused targets detected — cannot generate recommendations.")
+            st.warning("No fused targets detected at this timestep.")
         else:
-            st.subheader(f"Best Interceptor Recommendation — t = {frame['t']:.1f} s")
-            st.caption(f"Probability source: **{prob_label}**")
-
-            # ── Build recommendation map ─────────────────────────────
-            fig, ax = plt.subplots(figsize=(13, 9))
-
-            # Draw radars
-            radar_colors = plt.cm.Set1(np.linspace(0, 1, max(len(radars_sim), 3)))
-            for r_idx, radar in enumerate(radars_sim):
-                rx, ry = radar.position[0], radar.position[1]
-                ax.plot(rx, ry, "s", color=radar_colors[r_idx], markersize=11,
-                        label=f"Radar {r_idx} ({radar.fc/1e9:.1f} GHz)")
-                ax.annotate(f"R{r_idx}", (rx, ry),
-                            textcoords="offset points", xytext=(-12, -12),
-                            fontsize=7, color=radar_colors[r_idx], fontweight="bold")
-
-            # Draw interceptor systems
-            intc_colors = plt.cm.Dark2(np.linspace(0, 1, max(len(systems), 3)))
-            for s_idx, sys_obj in enumerate(systems):
-                sx, sy = sys_obj.position[0], sys_obj.position[1]
-                ax.plot(sx, sy, "^", color=intc_colors[s_idx], markersize=12,
-                        label=sys_obj.name)
-                ax.annotate(sys_obj.name, (sx, sy),
-                            textcoords="offset points", xytext=(8, -14),
-                            fontsize=6, color=intc_colors[s_idx], fontweight="bold")
-
-            # Draw fused targets and best interceptor connections
+            st.caption(
+                f"Summary at t = {frame['t']:.1f} s — source: **{prob_label}**"
+            )
             recommendations = []
             for j, ft in enumerate(fused):
-                tx, ty = ft.position[0], ft.position[1]
-                ax.plot(tx, ty, "o", color="crimson", markersize=10, zorder=5)
-                ax.annotate(f"FT{ft.fused_index}",
-                            (tx, ty), textcoords="offset points", xytext=(10, 6),
-                            fontsize=8, color="crimson", fontweight="bold")
-
-                # Find best interceptor for this target
                 if j < P.shape[1]:
-                    probs_for_target = P[:, j]
-                    best_idx = int(np.argmax(probs_for_target))
-                    best_prob = probs_for_target[best_idx]
-
-                    if best_prob > 0:
-                        best_sys = systems[best_idx]
-                        sx, sy = best_sys.position[0], best_sys.position[1]
-
-                        # Red line from target to best interceptor
-                        ax.plot([tx, sx], [ty, sy], '-', color='red',
-                                linewidth=2.0, alpha=0.7, zorder=3)
-
-                        # Probability label at midpoint
-                        mid_x, mid_y = (tx + sx) / 2, (ty + sy) / 2
-                        ax.text(mid_x, mid_y, f"{best_prob*100:.1f}%",
-                                ha="center", va="center", fontsize=8,
-                                fontweight="bold", color="white",
-                                bbox=dict(boxstyle="round,pad=0.3",
-                                          facecolor="red", alpha=0.8))
-
-                        recommendations.append({
-                            "Target": f"FT{ft.fused_index}",
-                            "Position": f"({ft.position[0]:.0f}, {ft.position[1]:.0f})",
-                            "Best Interceptor": best_sys.name,
-                            "P(intercept)": f"{best_prob*100:.1f}%",
-                        })
-                    else:
-                        # No viable interceptor
-                        ax.annotate("No viable\ninterceptor",
-                                    (tx, ty), textcoords="offset points",
-                                    xytext=(10, -18), fontsize=6,
-                                    color="gray", fontstyle="italic")
-                        recommendations.append({
-                            "Target": f"FT{ft.fused_index}",
-                            "Position": f"({ft.position[0]:.0f}, {ft.position[1]:.0f})",
-                            "Best Interceptor": "—",
-                            "P(intercept)": "0.0%",
-                        })
-
-            ax.set_xlabel("X [m]")
-            ax.set_ylabel("Y [m]")
-            ax.set_title("Tactical Recommendation Map — Best Interceptor per Target")
-            ax.set_aspect("equal")
-            ax.legend(loc="upper left", fontsize=7, ncol=2)
-            ax.grid(True, alpha=0.3)
-            plt.tight_layout()
-            fig_to_st(fig)
-
-            # ── Summary table ────────────────────────────────────────
-            st.subheader("Recommendation Summary")
+                    best_idx  = int(np.argmax(P[:, j]))
+                    best_prob = float(P[best_idx, j])
+                    recommendations.append({
+                        "Target": f"FT{ft.fused_index}",
+                        "Position": f"({ft.position[0]:.0f}, {ft.position[1]:.0f})",
+                        "Best Interceptor": systems[best_idx].name if best_prob > 0 else "\u2014",
+                        "P(intercept)": f"{best_prob * 100:.1f}%",
+                    })
             if recommendations:
+                st.subheader("Recommendation Summary")
                 st.dataframe(pd.DataFrame(recommendations), use_container_width=True)
