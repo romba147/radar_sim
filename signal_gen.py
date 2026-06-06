@@ -115,6 +115,33 @@ class SignalGenerator:
         # amplitude relative to the simulation noise level
         return np.sqrt(max(snr * self.noise.thermal_noise_power, 0.0))
 
+    def _micro_doppler_phase(self, target_type: str, m: int) -> float:
+        """Return the micro-Doppler phase offset for pulse m based on target type.
+
+        Models class-specific rotating / oscillating parts as sinusoidal phase
+        modulations in slow-time, which produce Doppler sidebands (HERM / blade
+        flash lines) in the Range-Doppler map.
+        """
+        PRI = self.wf.PRI
+        t_m = m * PRI  # slow-time at pulse m
+
+        if target_type == "drone":
+            # 4 rotors at ~200 Hz blade flash; slight frequency spread across rotors
+            rotor_freqs = [195.0, 200.0, 205.0, 210.0]
+            amplitude = 0.8  # large sidebands, visible above noise
+            phase = sum(amplitude * np.sin(2 * np.pi * f * t_m) for f in rotor_freqs)
+
+        elif target_type == "helicopter":
+            # main rotor ~10 Hz (large amplitude) + tail rotor ~60 Hz
+            phase = (1.2 * np.sin(2 * np.pi * 10.0 * t_m)
+                     + 0.4 * np.sin(2 * np.pi * 60.0 * t_m))
+
+        else:  # fixed_wing / missile
+            # turbine blade at ~500 Hz, very small — almost no visible sidebands
+            phase = 0.05 * np.sin(2 * np.pi * 500.0 * t_m)
+
+        return phase
+
     def generate_rx_signal(self) -> np.ndarray:
         """Build the received signal matrix (N_samples x N_pulses) from all targets."""
         N = self.wf.N_samples
@@ -143,8 +170,10 @@ class SignalGenerator:
                         phase_fast = 2 * np.pi * self.radar.fc * tau * np.ones(N)
 
                 doppler_phase = 2 * np.pi * (2 * vr / self.wavelength) * m * self.wf.PRI
+                micro_doppler_phase = self._micro_doppler_phase(geom.target_type, m)
 
-                rx[:, m] += amp * np.exp(1j * (phase_fast + doppler_phase))
+                rx[:, m] += amp * np.exp(1j * (phase_fast + doppler_phase
+                                                + micro_doppler_phase))
 
         return rx
 

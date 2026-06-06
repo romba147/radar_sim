@@ -56,6 +56,7 @@ class Target:
     position: np.ndarray   # (x, y, z) in meters
     velocity: np.ndarray   # (vx, vy, vz) in m/s
     rcs_dbsm: float        # radar cross section [dBsm]
+    target_type: str = "fixed_wing"  # "drone", "helicopter", "fixed_wing"
 
     def __post_init__(self):
         self.position = np.asarray(self.position, dtype=float)
@@ -78,6 +79,7 @@ class TargetGeometry:
     antenna_gain_dB: float
     rcs_dbsm: float
     rcs_linear: float
+    target_type: str = "fixed_wing"  # "drone", "helicopter", "fixed_wing"
 
 
 class Scenario:
@@ -124,6 +126,7 @@ class Scenario:
                     antenna_gain_dB=gain_dB,
                     rcs_dbsm=tgt.rcs_dbsm,
                     rcs_linear=tgt.rcs_linear,
+                    target_type=tgt.target_type,
                 ))
             all_geometry[r_idx] = results
         return all_geometry

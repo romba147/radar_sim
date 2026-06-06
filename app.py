@@ -25,6 +25,7 @@ from processing import ProcessingConfig, WindowType, RadarProcessor
 from fusion import associate_and_fuse, FusedTarget
 from interceptor import InterceptorSystem, InterceptBlackbox
 from feature_extraction import FEATURE_NAMES, extract_from_system_target
+from classifier import extract_doppler_features, classify_target
 
 warnings.filterwarnings("ignore")
 
@@ -633,7 +634,9 @@ def build_recommendation_plotly(sim_results: dict, systems: list):
         textfont=dict(color=RED, size=10, family="monospace"),
         hovertext=[
             f"FT{ft.fused_index}<br>X={ft.position[0]:.0f}m  Y={ft.position[1]:.0f}m<br>"
-            f"Speed={np.linalg.norm(ft.velocity_vector):.1f} m/s  TQ={ft.track_quality:.2f}"
+            f"Speed={np.linalg.norm(ft.velocity_vector):.1f} m/s  TQ={ft.track_quality:.2f}<br>"
+            f"Type: {ft.target_type or '—'}  Conf: "
+            f"{'—' if ft.classification_confidence is None else f'{ft.classification_confidence:.2f}'}"
             for ft in init_fused
         ],
         hoverinfo="text", name="Fused Targets", showlegend=True,
@@ -661,7 +664,9 @@ def build_recommendation_plotly(sim_results: dict, systems: list):
                     text=[f"FT{ft.fused_index}" for ft in fused],
                     hovertext=[
                         f"FT{ft.fused_index}<br>X={ft.position[0]:.0f}m  Y={ft.position[1]:.0f}m<br>"
-                        f"Speed={np.linalg.norm(ft.velocity_vector):.1f} m/s  TQ={ft.track_quality:.2f}"
+                        f"Speed={np.linalg.norm(ft.velocity_vector):.1f} m/s  TQ={ft.track_quality:.2f}<br>"
+                        f"Type: {ft.target_type or '—'}  Conf: "
+                        f"{'—' if ft.classification_confidence is None else f'{ft.classification_confidence:.2f}'}"
                         for ft in fused
                     ],
                 ),
@@ -828,27 +833,49 @@ with st.sidebar:
                                 value=5, step=1)
 
     target_defaults = [
-        dict(x=25000,  y=4000,   z=0,   vx=-200, vy=-30,  vz=0, rcs=10),  # inbound from ~NE
-        dict(x=15000,  y=1000,   z=500, vx=-150, vy=-10,  vz=0, rcs=5),   # inbound from E
-        dict(x=35000,  y=7500,   z=0,   vx=-245, vy=-50,  vz=0, rcs=15),  # inbound from NE
-        dict(x=10000,  y=500,    z=0,   vx=-120, vy=-5,   vz=0, rcs=0),   # inbound from E
-        dict(x=30000,  y=-2500,  z=0,   vx=-220, vy=20,   vz=0, rcs=8),   # inbound from SE
-        dict(x=20000,  y=15000,  z=500, vx=-145, vy=-110, vz=0, rcs=5),   # inbound from NE diagonal
-        dict(x=40000,  y=2500,   z=0,   vx=-280, vy=-15,  vz=0, rcs=12),  # inbound from far E
-        dict(x=7500,   y=12500,  z=500, vx=-65,  vy=-110, vz=0, rcs=3),   # inbound from N
-        dict(x=45000,  y=8000,   z=0,   vx=-305, vy=-55,  vz=0, rcs=9),   # inbound from far NE
-        dict(x=18000,  y=-5000,  z=200, vx=-175, vy=50,   vz=0, rcs=7),   # inbound from SE
-        dict(x=50000,  y=20000,  z=0,   vx=-280, vy=-110, vz=0, rcs=11),  # inbound from far NE
-        dict(x=12000,  y=18000,  z=300, vx=-80,  vy=-125, vz=0, rcs=6),   # inbound from N
-        dict(x=38000,  y=-8000,  z=0,   vx=-245, vy=50,   vz=0, rcs=14),  # inbound from far SE
-        dict(x=28000,  y=22000,  z=100, vx=-160, vy=-125, vz=0, rcs=4),   # inbound from NE
-        dict(x=55000,  y=3000,   z=0,   vx=-330, vy=-20,  vz=0, rcs=16),  # inbound from far E
-        dict(x=8000,   y=30000,  z=400, vx=-40,  vy=-155, vz=0, rcs=2),   # inbound from far N
-        dict(x=42000,  y=12000,  z=0,   vx=-260, vy=-75,  vz=0, rcs=13),  # inbound from NE
-        dict(x=22000,  y=-10000, z=0,   vx=-200, vy=90,   vz=0, rcs=8),   # inbound from SE
-        dict(x=60000,  y=25000,  z=200, vx=-295, vy=-125, vz=0, rcs=10),  # inbound from far NE
-        dict(x=16000,  y=35000,  z=500, vx=-70,  vy=-155, vz=0, rcs=5),   # inbound from far N
+        dict(x=25000,  y=4000,   z=0,   vx=-200, vy=-30,  vz=0, rcs=10, type="fixed_wing"),
+        dict(x=15000,  y=1000,   z=500, vx=-150, vy=-10,  vz=0, rcs=5,  type="drone"),
+        dict(x=35000,  y=7500,   z=0,   vx=-245, vy=-50,  vz=0, rcs=15, type="fixed_wing"),
+        dict(x=10000,  y=500,    z=0,   vx=-120, vy=-5,   vz=0, rcs=0,  type="drone"),
+        dict(x=30000,  y=-2500,  z=0,   vx=-220, vy=20,   vz=0, rcs=8,  type="helicopter"),
+        dict(x=20000,  y=15000,  z=500, vx=-145, vy=-110, vz=0, rcs=5,  type="drone"),
+        dict(x=40000,  y=2500,   z=0,   vx=-280, vy=-15,  vz=0, rcs=12, type="fixed_wing"),
+        dict(x=7500,   y=12500,  z=500, vx=-65,  vy=-110, vz=0, rcs=3,  type="helicopter"),
+        dict(x=45000,  y=8000,   z=0,   vx=-305, vy=-55,  vz=0, rcs=9,  type="fixed_wing"),
+        dict(x=18000,  y=-5000,  z=200, vx=-175, vy=50,   vz=0, rcs=7,  type="helicopter"),
+        dict(x=50000,  y=20000,  z=0,   vx=-280, vy=-110, vz=0, rcs=11, type="fixed_wing"),
+        dict(x=12000,  y=18000,  z=300, vx=-80,  vy=-125, vz=0, rcs=6,  type="drone"),
+        dict(x=38000,  y=-8000,  z=0,   vx=-245, vy=50,   vz=0, rcs=14, type="fixed_wing"),
+        dict(x=28000,  y=22000,  z=100, vx=-160, vy=-125, vz=0, rcs=4,  type="drone"),
+        dict(x=55000,  y=3000,   z=0,   vx=-330, vy=-20,  vz=0, rcs=16, type="fixed_wing"),
+        dict(x=8000,   y=30000,  z=400, vx=-40,  vy=-155, vz=0, rcs=2,  type="drone"),
+        dict(x=42000,  y=12000,  z=0,   vx=-260, vy=-75,  vz=0, rcs=13, type="helicopter"),
+        dict(x=22000,  y=-10000, z=0,   vx=-200, vy=90,   vz=0, rcs=8,  type="fixed_wing"),
+        dict(x=60000,  y=25000,  z=200, vx=-295, vy=-125, vz=0, rcs=10, type="fixed_wing"),
+        dict(x=16000,  y=35000,  z=500, vx=-70,  vy=-155, vz=0, rcs=5,  type="drone"),
     ]
+
+    _TYPE_OPTIONS = ["fixed_wing", "drone", "helicopter"]
+    _TYPE_PRESETS = {
+        "drone":      dict(speed=60,  rcs=-5,  z=200),
+        "helicopter": dict(speed=80,  rcs=8,   z=500),
+        "fixed_wing": dict(speed=220, rcs=12,  z=2000),
+    }
+
+    def _on_type_change(idx):
+        new_type = st.session_state[f"t{idx}type"]
+        preset = _TYPE_PRESETS[new_type]
+        vx = st.session_state.get(f"t{idx}vx", -200.0)
+        vy = st.session_state.get(f"t{idx}vy", 0.0)
+        current_speed = np.sqrt(vx**2 + vy**2)
+        if current_speed < 1.0:
+            vx, vy = -1.0, 0.0
+            current_speed = 1.0
+        scale = preset["speed"] / current_speed
+        st.session_state[f"t{idx}vx"] = round(vx * scale, 1)
+        st.session_state[f"t{idx}vy"] = round(vy * scale, 1)
+        st.session_state[f"t{idx}rcs"] = preset["rcs"]
+        st.session_state[f"t{idx}z"]   = float(preset["z"])
 
     target_cfgs = []
     for i in range(n_targets):
@@ -864,8 +891,13 @@ with st.sidebar:
             vz = c6.number_input(f"Vz (m/s)##t{i}vz", value=float(d["vz"]), step=5.0, key=f"t{i}vz")
             rcs = st.slider(f"RCS (dBsm)##t{i}", -20, 30,
                             value=int(d["rcs"]), key=f"t{i}rcs")
+            ttype = st.selectbox(f"Target Type##t{i}", _TYPE_OPTIONS,
+                                 index=_TYPE_OPTIONS.index(d.get("type", "fixed_wing")),
+                                 key=f"t{i}type",
+                                 on_change=_on_type_change,
+                                 args=(i,))
             target_cfgs.append(dict(x=tx, y=ty, z=tz,
-                                    vx=vx, vy=vy, vz=vz, rcs=rcs))
+                                    vx=vx, vy=vy, vz=vz, rcs=rcs, type=ttype))
 
     # ── Interceptor Systems ─────────────────────────────────────────
     st.subheader("Interceptor Systems")
@@ -914,6 +946,8 @@ with st.sidebar:
     st.subheader("Processing Options")
     use_clutter = st.checkbox("Enable Clutter", value=True)
     use_mti = st.checkbox("Enable MTI Filter", value=True)
+    use_classification = st.checkbox("Enable Target Classification", value=True,
+                                     help="Classify fused targets as drone / helicopter / fixed_wing.")
     use_ml = st.checkbox("Use ML (XGBoost) Model", value=True,
                          help="Requires xgb_intercept_model.json to exist.")
 
@@ -979,6 +1013,7 @@ def build_objects():
             position=[c["x"], c["y"], c["z"]],
             velocity=[c["vx"], c["vy"], c["vz"]],
             rcs_dbsm=c["rcs"],
+            target_type=c.get("type", "fixed_wing"),
         )
         for c in target_cfgs
     ]
@@ -1089,6 +1124,7 @@ if run_btn:
                 position=tgt.position + tgt.velocity * t,
                 velocity=tgt.velocity,
                 rcs_dbsm=tgt.rcs_dbsm,
+                target_type=tgt.target_type,
             )
             for tgt in targets
         ]
@@ -1144,6 +1180,31 @@ if run_btn:
             progress.progress(done / total_steps)
 
         fused_targets = associate_and_fuse(radars, per_radar_detections)
+
+        # ── Propagate manually-set target type to fused targets ────────
+        for ft in fused_targets:
+            closest = min(frame_targets,
+                          key=lambda t: np.linalg.norm(t.position[:2] - ft.position[:2]))
+            ft.target_type = closest.target_type
+
+        # ── Target classification (micro-Doppler) — overrides manual ──
+        if use_classification:
+            for ft in fused_targets:
+                best_det = max(ft.radar_detections, key=lambda d: d["power_dB"])
+                r_idx = best_det["radar_index"]
+                source_det = None
+                for det in per_radar_detections[r_idx]:
+                    if (abs(det["range"] - best_det["range"]) < 1.0
+                            and abs(det["velocity"] - best_det["velocity"]) < 0.5):
+                        source_det = det
+                        break
+                if source_det is not None and "range_bin" in source_det:
+                    rd_map   = per_radar_results[r_idx]["results"]["rd_map"]
+                    vel_axis = per_radar_results[r_idx]["results"]["velocity_axis"]
+                    features = extract_doppler_features(rd_map, source_det, vel_axis)
+                    label, confidence = classify_target(features)
+                    ft.target_type = label
+                    ft.classification_confidence = confidence
 
         blackbox_ana = InterceptBlackbox(systems, use_ml=False)
         P_analytical = blackbox_ana.evaluate(fused_targets)
@@ -1245,8 +1306,24 @@ with tab_fusion:
                     "Track Quality": round(ft.track_quality, 3),
                     "Position Method": ft.position_method,
                     "Power (dB)": round(ft.power_dB, 1),
+                    "Type": ft.target_type or "—",
+                    "Confidence": f"{ft.classification_confidence:.2f}" if ft.classification_confidence is not None else "—",
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+            # ── Classification summary ──────────────────────────────
+            classified = [ft for ft in fused if ft.target_type is not None]
+            if classified:
+                st.subheader("Classification Summary")
+                from collections import Counter
+                type_counts = Counter(ft.target_type for ft in classified)
+                avg_conf = {t: float(np.mean([ft.classification_confidence
+                                               for ft in classified if ft.target_type == t]))
+                            for t in type_counts}
+                st.dataframe(pd.DataFrame([
+                    {"Type": t, "Count": type_counts[t], "Avg Confidence": f"{avg_conf[t]:.2f}"}
+                    for t in sorted(type_counts)
+                ]), use_container_width=True)
 
             # Feature vector inspection
             st.subheader("Feature Vectors (per system–target pair)")
@@ -1385,6 +1462,7 @@ with tab_recommend:
                     recommendations.append({
                         "Target": f"FT{ft.fused_index}",
                         "Position": f"({ft.position[0]:.0f}, {ft.position[1]:.0f})",
+                        "Type": ft.target_type or "\u2014",
                         "Best Interceptor": systems[best_idx].name if best_prob > 0 else "\u2014",
                         "P(intercept)": f"{best_prob * 100:.1f}%",
                     })

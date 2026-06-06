@@ -1,3 +1,4 @@
+import os
 import numpy as np
 
 from scenario import Radar, Target, Scenario
@@ -6,6 +7,7 @@ from processing import ProcessingConfig, WindowType, RadarProcessor, plot_result
 from fusion import associate_and_fuse, print_fusion_report
 from interceptor import InterceptorSystem, InterceptBlackbox, \
                         print_intercept_table, plot_intercept_matrix
+from classifier import extract_doppler_features, classify_target
 
 
 def main():
@@ -44,11 +46,11 @@ def main():
     ]
 
     targets = [
-        Target(position=[5000, 800, 0],   velocity=[25, 5, 0],   rcs_dbsm=10),
-        Target(position=[3000, 200, 50],  velocity=[-15, 0, 0],  rcs_dbsm=5),
-        Target(position=[7000, 1500, 0],  velocity=[20, -10, 0], rcs_dbsm=15),
-        Target(position=[2000, 100, 0],   velocity=[10, 2, 0],   rcs_dbsm=0),
-        Target(position=[6000, -500, 0],  velocity=[-30, 8, 0],  rcs_dbsm=8),
+        Target(position=[5000, 800, 0],   velocity=[25, 5, 0],   rcs_dbsm=10, target_type="drone"),
+        Target(position=[3000, 200, 50],  velocity=[-15, 0, 0],  rcs_dbsm=5,  target_type="helicopter"),
+        Target(position=[7000, 1500, 0],  velocity=[20, -10, 0], rcs_dbsm=15, target_type="fixed_wing"),
+        Target(position=[2000, 100, 0],   velocity=[10, 2, 0],   rcs_dbsm=0,  target_type="drone"),
+        Target(position=[6000, -500, 0],  velocity=[-30, 8, 0],  rcs_dbsm=8,  target_type="helicopter"),
     ]
 
     scenario = Scenario(radars, targets)
@@ -147,6 +149,8 @@ def main():
     ]
 
     per_radar_detections = {}
+    per_radar_rd_maps = {}      # rd_map per radar index for classification
+    per_radar_vel_axes = {}     # velocity_axis per radar index
 
     for r_idx, radar in enumerate(radars):
         cfg = radar_configs[r_idx]
@@ -175,6 +179,8 @@ def main():
 
         estimated = results["estimated_targets"]
         per_radar_detections[r_idx] = estimated
+        per_radar_rd_maps[r_idx] = results["rd_map"]
+        per_radar_vel_axes[r_idx] = results["velocity_axis"]
 
         print(f"  CFAR detections: {len(estimated)}")
         for d_idx, det in enumerate(estimated):
@@ -196,6 +202,32 @@ def main():
     print("=" * 62)
 
     fused_targets = associate_and_fuse(radars, per_radar_detections)
+
+    # ── Target classification from micro-Doppler spectral features ───────
+    print("\n  Classifying fused targets from Range-Doppler spectrograms...")
+    for ft in fused_targets:
+        # pick the radar detection with the best SNR for this fused target
+        best_det = max(ft.radar_detections, key=lambda d: d["power_dB"])
+        r_idx = best_det["radar_index"]
+
+        # find the matching per-radar detection dict (has range_bin / doppler_bin)
+        source_det = None
+        for det in per_radar_detections[r_idx]:
+            if (abs(det["range"] - best_det["range"]) < 1.0
+                    and abs(det["velocity"] - best_det["velocity"]) < 0.5):
+                source_det = det
+                break
+
+        if source_det is not None and "range_bin" in source_det:
+            features = extract_doppler_features(
+                per_radar_rd_maps[r_idx],
+                source_det,
+                per_radar_vel_axes[r_idx],
+            )
+            label, confidence = classify_target(features)
+            ft.target_type = label
+            ft.classification_confidence = confidence
+
     print_fusion_report(fused_targets)
 
     # ═══════════════════════════════════════════════════════════════════
@@ -241,26 +273,138 @@ def main():
         ),
     ]
 
+    # ── 4a: Train XGBoost model if not already trained ───────────────
+    model_path = "xgb_intercept_model.json"
+    data_path = "mc_engagement_data.npz"
+
+    if not os.path.exists(model_path):
+        print("\n" + "=" * 62)
+        print("       PART 4a -- TRAINING XGBOOST INTERCEPT MODEL")
+        print("=" * 62)
+        from train_model import train
+        train(data_path=data_path, model_path=model_path,
+              n_samples=50000, seed=42, verbose=True)
+
+    # ── 4b: Analytical intercept assessment ──────────────────────────
     print("\n" + "=" * 62)
-    print("              PART 4 -- INTERCEPT ASSESSMENT")
+    print("         PART 4b -- ANALYTICAL INTERCEPT ASSESSMENT")
     print("=" * 62)
     print(f"  {len(systems)} interceptor systems vs "
           f"{len(fused_targets)} fused targets\n")
 
-    blackbox = InterceptBlackbox(systems)
-    P = blackbox.evaluate(fused_targets)
+    blackbox_analytical = InterceptBlackbox(systems, use_ml=False)
+    P_analytical = blackbox_analytical.evaluate(fused_targets)
 
-    print("=== Intercept Probability Matrix [%] ===\n")
-    print_intercept_table(systems, fused_targets, P)
+    print("=== Analytical Intercept Probability Matrix [%] ===\n")
+    print_intercept_table(systems, fused_targets, P_analytical)
 
-    plot_intercept_matrix(systems, fused_targets, P,
-                          save_path="intercept_matrix.png")
+    plot_intercept_matrix(systems, fused_targets, P_analytical,
+                          save_path="intercept_matrix_analytical.png")
+
+    # ── 4c: ML-based intercept assessment ────────────────────────────
+    print("\n" + "=" * 62)
+    print("           PART 4c -- ML INTERCEPT ASSESSMENT")
+    print("=" * 62)
+
+    blackbox_ml = InterceptBlackbox(systems, use_ml=True,
+                                    model_path=model_path)
+    P_ml = blackbox_ml.evaluate(fused_targets)
+
+    print("=== ML (XGBoost) Intercept Probability Matrix [%] ===\n")
+    print_intercept_table(systems, fused_targets, P_ml)
+
+    plot_intercept_matrix(systems, fused_targets, P_ml,
+                          save_path="intercept_matrix_ml.png")
+
+    # ── 4d: Side-by-side comparison ──────────────────────────────────
+    print("\n" + "=" * 62)
+    print("        PART 4d -- ANALYTICAL vs ML COMPARISON")
+    print("=" * 62)
+
+    _print_comparison(systems, fused_targets, P_analytical, P_ml)
+    _plot_comparison(systems, fused_targets, P_analytical, P_ml)
 
     # ── Scenario plot (with interceptor positions) ───────────────────
     scenario.plot_scenario(geometry, interceptor_systems=systems,
                            save_path="scenario_plot.png")
 
     print("\nDone.")
+
+
+def _print_comparison(systems, fused_targets, P_ana, P_ml):
+    """Print side-by-side analytical vs ML probabilities."""
+    n_sys, n_tgt = P_ana.shape
+    print(f"\n  {'System':<20s}", end="")
+    for j in range(n_tgt):
+        print(f"  FT{j} Ana/ML  ", end="")
+    print()
+    print("  " + "-" * (20 + n_tgt * 16))
+    for i, sys in enumerate(systems):
+        print(f"  {sys.name:<20s}", end="")
+        for j in range(n_tgt):
+            a = P_ana[i, j] * 100
+            m = P_ml[i, j] * 100
+            print(f"  {a:5.1f}/{m:5.1f}%  ", end="")
+        print()
+
+    # Aggregate metrics
+    diff = np.abs(P_ana - P_ml) * 100
+    print(f"\n  Mean absolute difference: {diff.mean():.1f}%")
+    print(f"  Max absolute difference:  {diff.max():.1f}%")
+    corr = np.corrcoef(P_ana.ravel(), P_ml.ravel())[0, 1] if P_ana.size > 1 else float('nan')
+    print(f"  Correlation:              {corr:.4f}")
+
+
+def _plot_comparison(systems, fused_targets, P_ana, P_ml):
+    """Generate side-by-side heatmaps and scatter comparison plot."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+    n_sys, n_tgt = P_ana.shape
+
+    sys_labels = [s.name for s in systems]
+    tgt_labels = [f"FT{j}" for j in range(n_tgt)]
+
+    # Analytical heatmap
+    im0 = axes[0].imshow(P_ana * 100, cmap="RdYlGn", vmin=0, vmax=100, aspect="auto")
+    axes[0].set_xticks(range(n_tgt)); axes[0].set_xticklabels(tgt_labels, fontsize=8)
+    axes[0].set_yticks(range(n_sys)); axes[0].set_yticklabels(sys_labels, fontsize=8)
+    axes[0].set_title("Analytical Model")
+    for i in range(n_sys):
+        for j in range(n_tgt):
+            c = "white" if P_ana[i,j]*100 < 30 or P_ana[i,j]*100 > 70 else "black"
+            axes[0].text(j, i, f"{P_ana[i,j]*100:.1f}", ha="center", va="center", fontsize=8, color=c)
+    plt.colorbar(im0, ax=axes[0], label="%")
+
+    # ML heatmap
+    im1 = axes[1].imshow(P_ml * 100, cmap="RdYlGn", vmin=0, vmax=100, aspect="auto")
+    axes[1].set_xticks(range(n_tgt)); axes[1].set_xticklabels(tgt_labels, fontsize=8)
+    axes[1].set_yticks(range(n_sys)); axes[1].set_yticklabels(sys_labels, fontsize=8)
+    axes[1].set_title("XGBoost ML Model")
+    for i in range(n_sys):
+        for j in range(n_tgt):
+            c = "white" if P_ml[i,j]*100 < 30 or P_ml[i,j]*100 > 70 else "black"
+            axes[1].text(j, i, f"{P_ml[i,j]*100:.1f}", ha="center", va="center", fontsize=8, color=c)
+    plt.colorbar(im1, ax=axes[1], label="%")
+
+    # Scatter: analytical vs ML
+    axes[2].scatter(P_ana.ravel() * 100, P_ml.ravel() * 100,
+                    c="steelblue", s=80, edgecolors="navy", alpha=0.8)
+    axes[2].plot([0, 100], [0, 100], "k--", alpha=0.4, label="y = x")
+    axes[2].set_xlabel("Analytical P(intercept) [%]")
+    axes[2].set_ylabel("ML P(intercept) [%]")
+    axes[2].set_title("Analytical vs ML")
+    axes[2].set_xlim(-5, 105); axes[2].set_ylim(-5, 105)
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+
+    plt.suptitle("Intercept Probability Comparison: Analytical vs XGBoost", fontsize=13)
+    plt.tight_layout()
+    fig.savefig("intercept_comparison.png", dpi=150)
+    plt.close()
+    print(f"  Comparison plot saved → intercept_comparison.png")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,8 @@ class FusedTarget:
     power_dB: float                           # best (highest) power across radars
     track_quality: float                      # quality metric [0, 1]
     position_method: str                      # "triangulation" or "boresight_approx"
+    target_type: Optional[str] = None         # classifier output: "drone", "helicopter", "fixed_wing"
+    classification_confidence: Optional[float] = None  # classifier confidence [0, 1]
 
 
 def _boresight_direction(radar: Radar) -> np.ndarray:
@@ -281,15 +283,19 @@ def associate_and_fuse(radars: List[Radar],
 def print_fusion_report(fused_targets: List[FusedTarget]):
     """Print a summary table of fused targets."""
     print(f"\n  {len(fused_targets)} fused targets")
-    print("-" * 90)
+    print("-" * 110)
     print(f"  {'FT':>3s}  {'X [m]':>8s}  {'Y [m]':>8s}  {'Z [m]':>8s}  "
-          f"{'|V| [m/s]':>10s}  {'Radars':>6s}  {'Quality':>7s}  {'Method':<16s}  {'PdB':>6s}")
-    print("-" * 90)
+          f"{'|V| [m/s]':>10s}  {'Radars':>6s}  {'Quality':>7s}  {'Method':<16s}  "
+          f"{'PdB':>6s}  {'Type':<12s}  {'Conf':>5s}")
+    print("-" * 110)
     for ft in fused_targets:
         speed = np.linalg.norm(ft.velocity_vector)
         radar_str = ",".join(str(d["radar_index"]) for d in ft.radar_detections)
+        ttype = ft.target_type or "unknown"
+        conf = f"{ft.classification_confidence:.2f}" if ft.classification_confidence is not None else "  n/a"
         print(f"  {ft.fused_index:3d}  {ft.position[0]:8.0f}  {ft.position[1]:8.0f}  "
               f"{ft.position[2]:8.0f}  {speed:10.1f}  "
               f"{radar_str:>6s}  {ft.track_quality:7.3f}  "
-              f"{ft.position_method:<16s}  {ft.power_dB:6.1f}")
-    print("-" * 90)
+              f"{ft.position_method:<16s}  {ft.power_dB:6.1f}  "
+              f"{ttype:<12s}  {conf:>5s}")
+    print("-" * 110)
