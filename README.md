@@ -1,6 +1,6 @@
 # GeneralSim — Radar Simulation & Intercept Prediction System
 
-An end-to-end radar simulation pipeline that covers scenario definition, signal generation, signal processing, multi-radar fusion, and intercept probability assessment using both analytical and ML-based (XGBoost) models.
+An end-to-end radar simulation pipeline that covers scenario definition, signal generation, signal processing, multi-radar fusion, target classification, and intercept probability assessment using both analytical and ML-based (XGBoost) models.
 
 ---
 
@@ -8,12 +8,14 @@ An end-to-end radar simulation pipeline that covers scenario definition, signal 
 
 ```
 GeneralSim/
-├── main.py                  # Orchestration entry point
+├── app.py                   # Interactive Streamlit dashboard (recommended entry point)
+├── main.py                  # Headless orchestration entry point
 ├── scenario.py              # Radar/target geometry definitions
 ├── signal_gen.py            # Radar signal generation
 ├── processing.py            # Signal processing & CFAR detection
 ├── feature_extraction.py    # Feature engineering for ML
 ├── fusion.py                # Multi-radar detection fusion
+├── classifier.py            # Micro-Doppler target classification
 ├── interceptor.py           # Intercept probability assessment
 ├── mc_simulator.py          # Monte Carlo engagement simulation
 ├── train_model.py           # XGBoost model training
@@ -28,6 +30,8 @@ GeneralSim/
 
 ```
 scenario.py  →  signal_gen.py  →  processing.py  →  fusion.py
+                                                         ↓
+                                               classifier.py  (micro-Doppler)
                                                          ↓
                                                feature_extraction.py
                                                          ↓
@@ -67,7 +71,7 @@ Defines radar and target objects and computes their geometric relationships.
 | `tx_power_watts` | Converts transmit power from dBm to watts. |
 | `antenna_gain_linear` | Converts antenna gain from dB to linear scale. |
 
-**`Target`** — Represents a moving target.
+**`Target`** — Represents a moving target. Fields: `position`, `velocity`, `rcs_dbsm`, `target_type` (`"drone"`, `"helicopter"`, or `"fixed_wing"`, default `"fixed_wing"`).
 
 | Property | Description |
 |---|---|
@@ -166,7 +170,7 @@ Associates detections from multiple radars into fused targets using triangulatio
 
 #### Classes
 
-**`FusedTarget`** — Stores a fused estimate: Cartesian position, velocity vector, number of contributing radars, per-radar detection info, best power, track quality, and position method used.
+**`FusedTarget`** — Stores a fused estimate: Cartesian position, velocity vector, number of contributing radars, per-radar detection info, best power, track quality, position method, and optional classification result (`target_type`, `classification_confidence`).
 
 #### Functions
 
@@ -178,6 +182,19 @@ Associates detections from multiple radars into fused targets using triangulatio
 | `_estimate_velocity_vector(radars, detections, radar_indices, target_pos)` | Solves for 3D velocity by fitting radial velocity measurements via least-squares. |
 | `associate_and_fuse(radars, per_radar_detections, gate_factor)` | Main fusion function. Converts detections to approximate Cartesian positions, runs greedy nearest-neighbour association with spatial gating, triangulates position, estimates velocity, and returns a list of `FusedTarget` objects. |
 | `print_fusion_report(fused_targets)` | Prints a formatted table of fused target parameters. |
+
+---
+
+### `classifier.py` — Micro-Doppler Target Classification
+
+Classifies fused targets as `drone`, `helicopter`, or `fixed_wing` by analysing the Doppler spectral profile at a detected target's range bin.
+
+| Function | Description |
+|---|---|
+| `extract_doppler_features(rd_map, detection, velocity_axis)` | Extracts four micro-Doppler spectral features from the Range-Doppler map at a target's range bin: Doppler bandwidth (10-dB width), sideband symmetry, spectral entropy, and peak sideband offset. Requires `range_bin` and `doppler_bin` from the per-radar detection dict. |
+| `classify_target(features)` | Rule-based classifier that maps the four spectral features to a `(label, confidence)` tuple. Drones exhibit wide, symmetric Doppler spread; helicopters show moderate bandwidth with low-frequency sidebands; fixed-wing targets have narrow bulk Doppler with minimal sidebands. |
+
+Classification is run in the simulation loop after multi-radar fusion. Each `FusedTarget` uses the highest-SNR contributing detection to select the Range-Doppler map, and the result is stored in `ft.target_type` and `ft.classification_confidence`. When **Enable Target Classification** is unchecked, the manually-set sidebar type is used instead.
 
 ---
 
@@ -247,23 +264,68 @@ Simple script that prints the Python version and executable path to the console.
 
 ---
 
+### `app.py` — Streamlit Dashboard
+
+Interactive web dashboard. The recommended way to run GeneralSim.
+
+#### Sidebar configuration
+
+| Section | Controls |
+|---|---|
+| **Radars** (1–12) | Position, frequency, TX power, antenna gain, beamwidth, look azimuth/elevation |
+| **Targets** (1–20) | Position, velocity (Vx/Vy/Vz), RCS, **Target Type** (drone / helicopter / fixed_wing) |
+| **Interceptor Systems** (1–12) | Name, position, max/min range, max velocity, reaction time, salvo size |
+| **Processing Options** | Enable Clutter, Enable MTI Filter, **Enable Target Classification**, Use ML Model |
+| **Time Stepping** | Simulation duration and time-step interval |
+
+When **Target Type** is changed in a target expander, the velocity magnitude, RCS, and altitude automatically snap to realistic defaults for that type while preserving the direction of travel:
+
+| Type | Typical speed | Typical RCS | Typical altitude |
+|---|---|---|---|
+| `drone` | 60 m/s | −5 dBsm | 200 m |
+| `helicopter` | 80 m/s | 8 dBsm | 500 m |
+| `fixed_wing` | 220 m/s | 12 dBsm | 2 000 m |
+
+#### Tabs
+
+| Tab | Content |
+|---|---|
+| **Scenario** | Animated Plotly tactical map (dark theme) with radar beam wedges, interceptor range rings, target trails, and play/pause/time-slider controls. Falls back to a static matplotlib preview before the simulation runs. |
+| **Signal Processing** | Per-radar range-Doppler maps and CFAR detection tables for the selected timestep. |
+| **Fusion** | Fused target table (position, velocity, track quality, **Type**, **Confidence**); **Classification Summary** panel (count and mean confidence per type); 17-feature vector inspection for each system–target pair. |
+| **Intercept Assessment** | Analytical and ML intercept probability heatmaps; comparison scatter plot with correlation and mean/max difference metrics; mean P(intercept) over time chart. |
+| **Recommendation** | Animated Plotly engagement map showing best-interceptor assignments with probability labels; summary table with Best Interceptor, P(intercept), and **Type** per fused target. |
+
+#### Key helper functions
+
+| Function | Description |
+|---|---|
+| `build_scenario_plotly(sim_results, systems)` | Builds an animated dark-theme Plotly tactical map with radar wedges, range rings, target trails, and velocity arrows. |
+| `build_recommendation_plotly(sim_results, systems)` | Builds an animated Plotly map showing engagement lines and probability annotations between interceptors and fused targets. Hover text includes target type and classification confidence. |
+| `plot_range_doppler(results, radar_idx)` | Returns a 2-panel matplotlib figure: Range-Doppler map and CFAR detections overlay. |
+| `plot_intercept_heatmap(systems, fused_targets, P, title)` | Returns a RdYlGn heatmap of the (N_systems × N_targets) probability matrix. |
+| `plot_comparison_scatter(P_ana, P_ml)` | Returns a scatter plot comparing analytical vs ML intercept probabilities. |
+
+---
+
 ## Requirements
 
 Install all dependencies with:
 
 ```bash
-pip install numpy scipy matplotlib xgboost scikit-learn streamlit pandas
+pip install numpy scipy matplotlib xgboost scikit-learn streamlit pandas plotly
 ```
 
 | Package | Purpose |
 |---|---|
 | `numpy` | Array math throughout the pipeline |
 | `scipy` | Least-squares solvers used in fusion |
-| `matplotlib` | All plot generation |
+| `matplotlib` | Static plot generation |
 | `xgboost` | ML intercept probability model |
 | `scikit-learn` | Train/test split and evaluation metrics |
 | `streamlit` | Interactive dashboard (`app.py`) |
 | `pandas` | DataFrames displayed in the dashboard |
+| `plotly` | Animated interactive tactical maps in the dashboard |
 
 ---
 
@@ -277,11 +339,12 @@ streamlit run app.py
 
 Then open **http://localhost:8501** in your browser.
 
-Use the sidebar to configure radars, targets, and interceptor systems, then press **▶ Run Simulation**.
+Configure radars, targets (including target type), and interceptor systems in the sidebar, then press **▶ Run Simulation**. Use the time slider to step through the scenario frames.
 
-> If `streamlit` is not on your PATH, use the full executable path:
+> If `streamlit` is not on your PATH, activate the virtual environment first:
 > ```bash
-> C:\Users\ROMBEN\python\Local\miniconda3\Scripts\streamlit.exe run app.py
+> .venv\Scripts\activate
+> streamlit run app.py
 > ```
 
 ### Option 2 — Command-line script
