@@ -11,7 +11,6 @@ InterceptBlackbox._compute() can be swapped at any time without touching
 anything else in the project.
 """
 
-import os
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
@@ -20,7 +19,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from fusion import FusedTarget
-from feature_extraction import extract_from_system_target, FEATURE_NAMES
 
 
 # ── System definition ────────────────────────────────────────────────
@@ -55,23 +53,8 @@ class InterceptBlackbox:
         probability[i, j] = P(system i intercepts target j)
     """
 
-    def __init__(self, systems: List[InterceptorSystem],
-                 use_ml: bool = False,
-                 model_path: str = "xgb_intercept_model.json"):
+    def __init__(self, systems: List[InterceptorSystem]):
         self.systems = systems
-        self.use_ml = use_ml
-        self._model = None
-
-        if use_ml:
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(
-                    f"XGBoost model not found at '{model_path}'. "
-                    f"Run train_model.py first, or set use_ml=False."
-                )
-            from xgboost import XGBClassifier
-            self._model = XGBClassifier()
-            self._model.load_model(model_path)
-            print(f"  [InterceptBlackbox] Loaded ML model from {model_path}")
 
     # ── PUBLIC API ───────────────────────────────────────────────────
 
@@ -100,32 +83,7 @@ class InterceptBlackbox:
 
     def _compute(self, system: InterceptorSystem,
                  target: Dict[str, Any]) -> float:
-        """Route to ML or analytical model based on use_ml flag."""
-        if self.use_ml and self._model is not None:
-            return self._compute_ml(system, target)
-        return self._compute_analytical(system, target)
-
-    def _compute_ml(self, system: InterceptorSystem,
-                    target: Dict[str, Any]) -> float:
-        """Intercept probability via the trained XGBoost model."""
-        # Build a lightweight object that has the fields extract_from_system_target expects
-        class _FT:
-            pass
-        ft = _FT()
-        ft.position = np.asarray(target["position"])
-        ft.velocity_vector = np.asarray(target["velocity_vector"])
-        ft.track_quality = target.get("track_quality", 0.5)
-        ft.n_radars = target.get("n_radars", 1)
-        ft.power_dB = target.get("power_dB", 0.0)
-        ft.position_method = target.get("position_method", "boresight_approx")
-
-        features = extract_from_system_target(system, ft).reshape(1, -1)
-        prob = self._model.predict_proba(features)[0, 1]
-        return float(np.clip(prob, 0.0, 1.0))
-
-    def _compute_analytical(self, system: InterceptorSystem,
-                            target: Dict[str, Any]) -> float:
-        """Analytical intercept probability (original formula).
+        """Intercept probability based on interceptor-to-target geometry.
 
         Uses Cartesian position & velocity estimates from multi-radar fusion:
           - Range check: interceptor-to-target Euclidean distance
